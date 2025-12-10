@@ -1,0 +1,52 @@
+name: reschool
+description: "A new Flutter project."
+
+publish_to: 'none' 
+
+version: 1.0.0+1
+
+environment:
+  sdk: '^3.10.3'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  http: ^1.6.0
+  crypto: ^3.0.7
+  shared_preferences: ^2.5.3
+  google_fonts: ^6.3.3
+  provider: ^6.1.5+1
+  intl: ^0.20.2
+  flutter_localizations:
+    sdk: flutter
+  path_provider: ^2.1.5
+  open_filex: ^4.7.0
+  permission_handler: ^12.0.1
+  share_plus: ^12.0.1
+  image_picker: ^1.1.2
+  file_picker: ^8.1.7
+  mime: ^2.0.0
+  url_launcher: ^6.3.1
+  flutter_secure_storage: ^9.2.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1 
+
+flutter:
+
+  uses-material-design: true
+
+  assets:
+    - assets/devices.json
+    - assets/icon.jpg 
+
+flutter_launcher_icons: 
+  android: true
+  ios: true
+  image_path: "assets/icon.jpg"
