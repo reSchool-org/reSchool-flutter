@@ -1,0 +1,53 @@
+name: Nightly Flutter Build
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Check for commits in last 24h
+        id: changes
+        run: |
+          COMMITS=$(git rev-list --count --since="24 hours ago" HEAD)
+          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+
+      - name: Stop if no changes
+        if: steps.changes.outputs.commits == '0'
+        run: |
+          echo "No changes in last 24h. Skipping build."
+          exit 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-build
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
