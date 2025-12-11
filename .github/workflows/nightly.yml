@@ -1,65 +1,51 @@
-name: Nightly Flutter Build
+name: Flutter CI
 
 on:
-  schedule:
-    - cron: "0 2 * * *"
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
-  build:
-    runs-on: Linux
+  build-and-test:
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - id: changes
-        run: |
-          COMMITS=$(git rev-list --count --since="24 hours ago" HEAD)
-          echo "commits=$COMMITS" >> "$GITHUB_OUTPUT"
-
-      - if: steps.changes.outputs.commits == '0'
-        run: |
-          echo "No changes in last 24h. Skipping build."
-
-      - if: steps.changes.outputs.commits != '0'
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
+          distribution: 'temurin'
+          java-version: '17'
 
-      - if: steps.changes.outputs.commits != '0'
-        env:
-          ANDROID_SDK_ROOT: /home/runner/android-sdk
-          ANDROID_HOME: /home/runner/android-sdk
-          FLUTTER_ROOT: /home/runner/actions-runner/_work/_tool/flutter/stable-3.38.4-x64
-        run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
-          echo "$FLUTTER_ROOT/bin" >> "$GITHUB_PATH"
-          export PATH="$FLUTTER_ROOT/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
-          flutter --version | head -n 1
-          flutter --version | grep -q "Flutter 3.38.4"
-          sdkmanager --version
-          yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
 
-      - if: steps.changes.outputs.commits != '0'
+      - name: Get Dependencies
         run: flutter pub get
 
-      - if: steps.changes.outputs.commits != '0'
+      - name: Run Analyze
+        run: flutter analyze
+
+      - name: Run Tests
+        run: flutter test
+
+      - name: Build APK
         run: flutter build apk --release
 
-      - if: steps.changes.outputs.commits != '0'
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-build
+          name: release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+
