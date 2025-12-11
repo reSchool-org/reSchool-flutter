@@ -5,26 +5,25 @@ on:
     - cron: "0 2 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   build:
-    runs-on: Linux
+    runs-on: [self-hosted, Linux, X64]
 
     steps:
-      - name: Mark repo as safe (for self-host)
-        run: | 
-            git config --global --add safe.directory "$GITHUB_WORKSPACE"
-            git config --global --add safe.directory /home/runner/actions-runner/_work/_tool/
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
+
       - name: Check for commits in last 24h
         id: changes
         run: |
           COMMITS=$(git rev-list --count --since="24 hours ago" HEAD)
-          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+          echo "commits=$COMMITS" >> "$GITHUB_OUTPUT"
 
       - name: Stop if no changes
         if: steps.changes.outputs.commits == '0'
@@ -35,14 +34,29 @@ jobs:
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.38.4'
-          cache: true
+      - name: Configure Android SDK
+        env:
+          ANDROID_SDK_ROOT: /home/runner/android-sdk
+          ANDROID_HOME: /home/runner/android-sdk
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Use preinstalled Flutter 3.38.4
+        env:
+          FLUTTER_ROOT: /home/runner/actions-runner/_work/_tool/flutter/stable-3.38.4-x64
+        run: |
+          echo "$FLUTTER_ROOT/bin" >> "$GITHUB_PATH"
+          flutter --version | head -n 1
+          flutter --version | grep -q "Flutter 3.38.4"
 
       - name: Install dependencies
         run: flutter pub get
@@ -54,5 +68,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nightly-build
-          path: |
-            build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
