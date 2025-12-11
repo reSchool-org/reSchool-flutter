@@ -11,7 +11,9 @@ jobs:
 
     steps:
       - name: Mark repo as safe (for self-host)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: | 
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            git config --global --add safe.directory /home/runner/actions-runner/_work/_tool/
 
       - name: Checkout repository
         uses: actions/checkout@v4
