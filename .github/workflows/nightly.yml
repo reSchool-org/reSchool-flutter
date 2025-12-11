@@ -10,6 +10,9 @@ jobs:
     runs-on: Linux
 
     steps:
+      - name: Mark repo as safe (for self-host)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
