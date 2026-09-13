@@ -1,0 +1,17 @@
+flutter/ephemeral/
+
+# личные файлы пользователя visual studio
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# файлы, которые visual studio делает при сборке
+x64/
+x86/
+
+# кэш visual studio
+# всё, что заканчивается на .cache, можно игнорировать
+*.[Cc]ache
+# но каталоги с таким окончанием оставляем под присмотром
+!*.[Cc]ache/

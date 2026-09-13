@@ -1,0 +1,115 @@
+services:
+  server_advanced:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reschool_server_advanced
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CADDY_ADMIN_URL: http://caddy:2019
+      RESCHOOL_RUNTIME_DIR: /app/server_advanced/runtime
+      TRUSTED_PROXY_IPS: 172.16.0.0/12
+      VERTEX_SA_KEY_PATH: /run/secrets/vertex-sa.json
+    ports:
+      - "127.0.0.1:20001:20001"
+    volumes:
+      - ./server_advanced/uploads:/app/server_advanced/uploads
+      - ./server_advanced/runtime:/app/server_advanced/runtime
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # разовый контейнер: готовит самоподписанный сертификат до старта caddy
+  certgen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reschool_certgen
+    env_file:
+      - .env
+    environment:
+      RESCHOOL_RUNTIME_DIR: /app/server_advanced/runtime
+    volumes:
+      - ./server_advanced/runtime:/app/server_advanced/runtime
+    command: ["python", "-m", "server_advanced.tls_manager"]
+    restart: "no"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: reschool_caddy
+    restart: unless-stopped
+    environment:
+      SERVER_DOMAIN: ${SERVER_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "4443:4443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./server_advanced/runtime/tls:/tls:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+
+  db:
+    image: postgres:16-alpine
+    container_name: reschool_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # база живёт в utc, тогда naive время в питоне и в postgres совпадает
+      PGTZ: UTC
+      TZ: UTC
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: reschool_redis
+    restart: unless-stopped
+    # кеш переживает рестарт, но терять его не страшно, поэтому только appendonly без фанатизма
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  adminer:
+    profiles: [dev]
+    image: adminer:latest
+    container_name: reschool_adminer
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  db_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

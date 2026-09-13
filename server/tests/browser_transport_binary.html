@@ -1,0 +1,15 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>reSchool binary transport test</title>
+<button id="run">Проверить файлы</button><pre id="result">Готово</pre><script src="rtc_transport.js"></script><script>
+run.onclick=async()=>{
+ result.textContent='Подключение…';
+ try{
+  const code=(await(await fetch('connection-code.txt')).text()).trim();
+  const server=await reSchoolTransport.saveCode(code);
+  let binary='';for(let i=0;i<1048576;i++)binary+=String.fromCharCode(i%256);
+  const response=JSON.parse(await reSchoolTransport.request(JSON.stringify({url:server+'/echo',method:'POST',headers:{'Content-Type':'application/octet-stream','X-API-Token':'fixture-only-token','X-Forwarded-For':'attacker'},body:btoa(binary)})));
+  const decoded=atob(response.body.replace(/-/g,'+').replace(/_/g,'/'));
+  if(response.status!==200||decoded!==binary)throw Error('Binary mismatch/status '+response.status);
+  if(response.headers['X-Test-Source']==='attacker')throw Error('Spoofed source');
+  result.textContent='PASS: POST и ответ 1 МиБ совпадают побайтно; заголовок токена передан; подмена IP удалена';
+ }catch(error){result.textContent='FAIL: '+error.message;}
+};</script></html>

@@ -1,0 +1,44 @@
+name: Server Release
+
+on:
+  push:
+    tags: ['server-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate server version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          version = Path('server/VERSION').read_text().strip()
+          assert re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', version)
+          assert os.environ['RELEASE_TAG'] == 'server-v' + version
+          PY
+      - run: python3 -m pip install -r server/requirements.txt
+      - run: PYTHONPATH=server python3 -m unittest discover -s server/tests -p 'test_server_*.py'
+      - name: Package server
+        run: |
+          python3 .github/scripts/package_cloud_server.py
+          mkdir -p dist
+          cp assets/cloud/server.tar.gz dist/reschool-server.tar.gz
+          cd dist
+          sha256sum reschool-server.tar.gz > reschool-server.tar.gz.sha256
+      - name: Publish immutable server assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/reschool-server.tar.gz dist/reschool-server.tar.gz.sha256 --verify-tag --latest=false --title "reSchool Server ${RELEASE_TAG#server-v}" --generate-notes

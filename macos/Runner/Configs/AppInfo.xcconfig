@@ -1,0 +1,13 @@
+// настройки уровня приложения для цели Runner
+// когда нибудь это может уехать в автогенерацию из метаданных, того же pubspec.yaml,
+// а пока значения ниже по умолчанию берутся из имени проекта, если файл создан
+// шаблоном flutter create
+
+// имя приложения, оно же по умолчанию заголовок окна
+PRODUCT_NAME = reschool
+
+// идентификатор бандла
+PRODUCT_BUNDLE_IDENTIFIER = com.magisky.reschoolbeta
+
+// копирайт, который видно в свойствах приложения
+PRODUCT_COPYRIGHT = Copyright © 2025 magisky. All rights reserved.

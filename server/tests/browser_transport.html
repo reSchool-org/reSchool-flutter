@@ -1,0 +1,29 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>reSchool - проверка WebRTC</title>
+<style>body{background:#111218;color:#dedfe7;font:16px system-ui;max-width:850px;margin:60px auto}button{background:#aec3ff;border:0;border-radius:12px;padding:14px 22px;font:inherit;color:#182448}pre{white-space:pre-wrap;line-height:1.6}input{margin:20px}</style>
+<h1>Проверка браузерного подключения</h1><p>Запросы идут по WebRTC. HTTPS личного сервера не используется.</p>
+<button id="run">Проверить соединение</button><pre id="result">Готово к проверке</pre>
+<script src="rtc_transport.js"></script><script>
+document.querySelector('#run').onclick = async () => {
+ const output=document.querySelector('#result'); output.textContent='Подключение…';
+ try {
+  const code=(await (await fetch('connection-code.txt')).text()).trim();
+  const server=await reSchoolTransport.saveCode(code);
+  const request=async(path,method='GET',body='')=>JSON.parse(await reSchoolTransport.request(JSON.stringify({url:server+path,method,headers:{'Content-Type':'application/json'},body})));
+  const decode=value=>atob(value.replace(/-/g,'+').replace(/_/g,'/'));
+  const config=await request('/config');
+  if(config.status!==200) throw Error('config status '+config.status);
+  const info=JSON.parse(decode(config.body));
+  output.textContent='✓ /config: 200; протокол '+info.cloudProtocolVersion;
+  const unauthorized=await request('/auth-check');
+  if(unauthorized.status!==401) throw Error('auth-check status '+unauthorized.status);
+  output.textContent+='\n✓ Без токена доступ закрыт: 401';
+  const parallel=await Promise.all([request('/config'),request('/config'),request('/config')]);
+  if(parallel.some(r=>r.status!==200)) throw Error('Parallel request failed');
+  output.textContent+='\n✓ Три параллельных запроса прошли';
+  // неверное тело должно дойти без изменений до отказа авторизации api
+  const invalid=await request('/auth-check','POST',btoa(JSON.stringify({apiToken:'invalid-test-token'})));
+  if(invalid.status!==401) throw Error('Invalid token accepted: '+invalid.status);
+  output.textContent+='\n✓ POST с неверным токеном отклонён: 401\nPASS: браузер ↔ личный сервер, без SSH и HTTPS-запросов к нему';
+ } catch(error) { output.textContent+='\nFAIL: '+error.message; }
+};
+</script></html>

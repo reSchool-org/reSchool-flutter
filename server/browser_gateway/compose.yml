@@ -1,0 +1,60 @@
+# запускаем из этого каталога после подготовки .env и ./web
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: browser_transport/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    command: [python, -m, browser_transport.gateway]
+    env_file: .env
+    environment:
+      GATEWAY_HOST: 127.0.0.1
+      BROWSER_ALLOWED_ORIGINS: https://${WEB_DOMAIN:-reschool.app}
+    mem_limit: 256m
+  web:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN:-reschool.app}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+  turn:
+    image: coturn/coturn:4.7.0
+    restart: unless-stopped
+    network_mode: host
+    # секрет общего ретранслятора передаём шлюзу, в браузерный код он не попадает
+    command:
+      - --log-file=stdout
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${BROWSER_TURN_SECRET:?Set BROWSER_TURN_SECRET}
+      - --realm=${WEB_DOMAIN:-reschool.app}
+      - --external-ip=${TURN_PUBLIC_IP:?Set TURN_PUBLIC_IP}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49260
+      - --total-quota=100
+      - --user-quota=4
+      - --max-bps=2000000
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=224.0.0.0-255.255.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+volumes:
+  caddy_data:
+  caddy_config:

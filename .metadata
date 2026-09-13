@@ -1,0 +1,38 @@
+# служебные метаданные flutter, нужны для обновления проекта
+
+version:
+  revision: "66dd93f9a27ffe2a9bfc8297506ce066ff51265f"
+  channel: "stable"
+
+project_type: app
+
+# пути для переноса проекта командой flutter migrate
+migration:
+  platforms:
+    - platform: root
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+    - platform: android
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+    - platform: ios
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+    - platform: linux
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+    - platform: macos
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+    - platform: web
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+    - platform: windows
+      create_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+      base_revision: 66dd93f9a27ffe2a9bfc8297506ce066ff51265f
+
+  # перечисляем только свои исключения, файлы вне шаблонов flutter пропустит сам
+
+  unmanaged_files:
+    - 'lib/main.dart'
+    - 'ios/Runner.xcodeproj/project.pbxproj'

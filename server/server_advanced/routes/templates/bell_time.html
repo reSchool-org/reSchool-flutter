@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>reSchool</title>
+{% if data %}
+<style nonce="{{ nonce }}">
+  body { font-family: system-ui, sans-serif; margin: 16px; max-width: 960px; }
+  .campuses { display: flex; flex-wrap: wrap; gap: 24px; }
+  section { flex: 1 1 320px; min-width: 0; }
+  .table-scroll { overflow-x: auto; margin: 16px 0; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 4px; text-align: left; border-bottom: 1px solid #ccc; }
+  .number { width: 3em; }
+  .offset { width: 6em; }
+  input, button { font: inherit; }
+  button { cursor: pointer; }
+  #status.error { color: #b00020; }
+</style>
+{% endif %}
+</head>
+<body>
+{% if not data %}
+<form id="login">
+  <p><label for="key">API-ключ:</label> <input id="key" type="password" autocomplete="current-password" required></p>
+  <button type="submit">Войти</button>
+</form>
+{% else %}
+<p><button id="logout" type="button">Выйти</button></p>
+<form id="editor">
+  <div class="campuses">
+    {% for campus in campuses %}
+    <section data-campus="{{ campus }}">
+      <h2>{{ names[loop.index0] }}</h2>
+      <p><label for="offset-{{ campus }}">Коррекция, сек.:</label>
+        <input id="offset-{{ campus }}" class="offset" type="number" min="-3600" max="3600" step="1" value="{{ data.presets[campus].offsetSeconds }}" required></p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Урок</th><th>Начало</th><th>Конец</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <button class="add" type="button">Добавить урок</button>
+    </section>
+    {% endfor %}
+  </div>
+  <button type="submit">Сохранить для всех</button>
+</form>
+{% endif %}
+<p id="status" role="status" aria-live="polite"></p>
+<script nonce="{{ nonce }}">
+const status = document.getElementById('status');
+function message(text, error = false) { status.textContent = text; status.className = error ? 'error' : 'success'; }
+async function api(path, method, body, headers = {}) {
+  const response = await fetch(path, {method, headers: {'Content-Type':'application/json', ...headers}, body: JSON.stringify(body)});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Не удалось выполнить запрос.');
+  return data;
+}
+{% if not data %}
+document.getElementById('login').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = event.target.querySelector('button'); button.disabled = true;
+  try {
+    await api('/time/login', 'POST', {apiToken: document.getElementById('key').value}, {'X-Bell-Login':'1'});
+    location.reload();
+  } catch (error) { message(error.message, true); button.disabled = false; }
+});
+{% else %}
+const initial = {{ data | tojson }};
+const csrf = {{ csrf | tojson }};
+let revision = initial.revision;
+function addRow(section, number, lesson = {start:'',end:''}) {
+  const row = document.createElement('tr');
+  for (const [field, value] of [['number', number], ['start', lesson.start], ['end', lesson.end]]) {
+    const cell = row.insertCell(); const input = document.createElement('input');
+    input.type = field === 'number' ? 'number' : 'time'; input.className = field;
+    input.required = true; input.value = value; input.step = '1';
+    input.setAttribute('aria-label', field === 'number' ? 'Номер урока' : field === 'start' ? 'Начало урока' : 'Конец урока');
+    if (field === 'number') { input.min = '0'; input.max = '15'; }
+    cell.append(input);
+  }
+  const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary';
+  remove.textContent = '×'; remove.setAttribute('aria-label', 'Удалить урок'); remove.addEventListener('click', () => row.remove());
+  row.insertCell().append(remove); section.querySelector('tbody').append(row);
+}
+for (const section of document.querySelectorAll('[data-campus]')) {
+  for (const [number, lesson] of Object.entries(initial.presets[section.dataset.campus].lessons)) addRow(section, number, lesson);
+  section.querySelector('.add').addEventListener('click', () => {
+    const numbers = [...section.querySelectorAll('.number')].map(input => Number(input.value));
+    if (numbers.length >= 16) return message('Можно добавить не более 16 уроков.', true);
+    addRow(section, Math.min(15, Math.max(0, ...numbers) + 1));
+  });
+}
+document.getElementById('editor').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = event.target.querySelector('button[type=submit]'); button.disabled = true;
+  try {
+    const presets = {};
+    for (const section of document.querySelectorAll('[data-campus]')) {
+      const lessons = {};
+      for (const row of section.querySelectorAll('tbody tr')) {
+        const number = String(Number(row.querySelector('.number').value));
+        if (number in lessons) throw new Error('Номера уроков не должны повторяться.');
+        lessons[number] = {start: row.querySelector('.start').value, end: row.querySelector('.end').value};
+      }
+      presets[section.dataset.campus] = {offsetSeconds: Number(section.querySelector('.offset').value), lessons};
+    }
+    const saved = await api('/time', 'PUT', {revision, presets}, {'X-CSRF-Token':csrf});
+    revision = saved.revision;
+    message('Сохранено.');
+  } catch (error) { message(error.message, true); }
+  finally { button.disabled = false; }
+});
+document.getElementById('logout').addEventListener('click', async () => {
+  try { await api('/time/logout', 'POST', {}, {'X-CSRF-Token':csrf}); location.reload(); }
+  catch (error) { message(error.message, true); }
+});
+{% endif %}
+</script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+name: Apple Unsigned Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Native target to check
+        type: choice
+        options: [all, ios-testflight, macos-testflight]
+        default: all
+      refresh_locks:
+        description: Regenerate native lockfiles for review before a release
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'assets/**'
+      - 'ios/**'
+      - 'macos/**'
+      - 'pubspec.*'
+      - 'deploy/**'
+      - '.github/workflows/apple-*.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.target == 'ios-testflight' && '["ios-testflight"]' || inputs.target == 'macos-testflight' && '["macos-testflight"]' || '["ios-testflight","macos-testflight"]') }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      COCOAPODS_DISABLE_STATS: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: false
+      - name: Package bundled cloud server
+        run: python3 .github/scripts/package_cloud_server.py
+      - name: Resolve locked dependencies
+        run: flutter pub get --enforce-lockfile
+      - name: Install pinned Apple tooling in the runner
+        run: |
+          export GEM_HOME="$RUNNER_TEMP/apple-gems"
+          export GEM_PATH="$GEM_HOME"
+          echo "GEM_HOME=$GEM_HOME" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$GEM_PATH" >> "$GITHUB_ENV"
+          gem install cocoapods --version 1.16.2 --no-document
+          gem install xcodeproj --version 1.27.0 --no-document
+          echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
+      - name: Compile app and widget without credentials
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 deploy/apple_release.py unsigned --target "$TARGET"
+      - name: Ensure native dependency locks did not change
+        if: ${{ !inputs.refresh_locks }}
+        run: git diff --exit-code -- pubspec.lock ios/Podfile.lock macos/Podfile.lock
+      - name: Preserve only lockfiles for diagnosing dependency drift
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 
+        with:
+          name: dependency-locks-${{ matrix.target }}
+          path: |
+            pubspec.lock
+            ios/Podfile.lock
+            macos/Podfile.lock
+          retention-days: 3

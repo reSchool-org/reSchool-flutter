@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- служба удерживает процесс для долгих фоновых задач -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <!-- с android 14 каждому типу foreground службы нужно отдельное разрешение -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE"/>
+
+    <!-- этот манифест включается через workmanager.enableDataSyncForegroundService=true
+    сверяем с основным манифестом, отличаются только право FOREGROUND_SERVICE_DATA_SYNC и тип dataSync -->
+    <application>
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync|shortService"
+            tools:node="merge"
+            tools:targetApi="34"/>
+    </application>
+</manifest>

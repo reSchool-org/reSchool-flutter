@@ -1,0 +1,68 @@
+group 'dev.fluttercommunity.workmanager'
+version '1.0-SNAPSHOT'
+
+rootProject.allprojects {
+    repositories {
+        mavenCentral()
+        google()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+
+android {
+    // условие сохраняет совместимость с agp до версии 4.2
+    if (project.android.hasProperty("namespace")) {
+        namespace 'dev.fluttercommunity.workmanager'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+        test.java.srcDirs += 'src/test/kotlin'
+        // разрешение dataSync требует отдельной декларации в play console, поэтому включаем его только через workmanager.enableDataSyncForegroundService=true
+        def wmDataSyncEnabled =
+            project.findProperty('workmanager.enableDataSyncForegroundService')
+                ?.toString() == 'true'
+        if (wmDataSyncEnabled) {
+            // подменяем манифест вариантом с правом и типом службы dataSync
+            main.manifest.srcFile 'src/main/AndroidManifest.dataSync.xml'
+        }
+    }
+    defaultConfig {
+        compileSdk 35
+        minSdkVersion 23
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+    lintOptions {
+        disable 'InvalidPackage'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+
+}
+
+
+dependencies {
+    def work_version = "2.11.2"
+    implementation "androidx.work:work-runtime:$work_version"
+    implementation "androidx.concurrent:concurrent-futures:1.1.0"
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation "org.jetbrains.kotlin:kotlin-test"
+    testImplementation "org.mockito:mockito-core:4.11.0"
+    testImplementation "org.mockito.kotlin:mockito-kotlin:4.1.0"
+    // в android.jar только заглушки json, для тестов нужна настоящая реализация
+    testImplementation 'org.json:json:20240303'
+    // для тестов jvm нужны рабочие реализации классов android
+    testImplementation 'org.robolectric:robolectric:4.16.1'
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}

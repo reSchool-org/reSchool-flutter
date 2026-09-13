@@ -1,0 +1,14 @@
+{
+  admin 0.0.0.0:2019
+}
+
+# https без домена и без let's encrypt: свой сертификат, приложение сверяет его по отпечатку
+:4443 {
+  encode zstd gzip
+  tls /tls/cert.pem /tls/key.pem
+  reverse_proxy server_advanced:20001
+}
+
+:80 {
+  respond "reSchool server is running. Use https on port 4443, or configure a domain in the reSchool app." 200
+}

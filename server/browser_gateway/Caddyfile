@@ -1,0 +1,15 @@
+{$WEB_DOMAIN:reschool.app} {
+    handle /signal {
+        reverse_proxy 127.0.0.1:8787 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+    redir / /web/ 302
+    redir /web /web/ 302
+    handle_path /web/* {
+        root * /srv/web
+        header Cache-Control "no-cache"
+        try_files {path} /index.html
+        file_server
+    }
+}

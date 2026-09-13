@@ -1,0 +1,156 @@
+name: Apple Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Distribution destination
+        type: choice
+        options: [ios-testflight, macos-testflight, macos-direct, macos-all, all]
+        required: true
+      version:
+        description: 'Marketing version, for example 2.0.0'
+        type: string
+        required: true
+      upload:
+        description: 'Upload iOS/native macOS builds to TestFlight (DMG is always notarized)'
+        type: boolean
+        default: false
+      publish_release:
+        description: 'Publish signed IPA/DMG in GitHub Release v<version>; never overwrite shipped assets'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-release-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 
+        with:
+          persist-credentials: false
+      - name: Select distribution targets
+        id: targets
+        env:
+          SELECTED_TARGET: ${{ inputs.target }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 -c 'import json, os, sys; sys.path.insert(0, "deploy"); from apple_release import TARGETS, version_values; version_values(os.environ["RELEASE_VERSION"], "1"); target = os.environ["SELECTED_TARGET"]; targets = list(TARGETS) if target == "all" else ["macos-testflight", "macos-direct"] if target == "macos-all" else [target]; assert all(item in TARGETS for item in targets); print("targets=" + json.dumps(targets))' >> "$GITHUB_OUTPUT"
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: false
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test
+      - run: python3 -m unittest discover -s deploy/tests -v
+
+  release:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.quality.outputs.targets) }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: apple-${{ matrix.target }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      COCOAPODS_DISABLE_STATS: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: false
+      - name: Package bundled cloud server
+        run: python3 .github/scripts/package_cloud_server.py
+      - name: Resolve locked dependencies before loading signing secrets
+        run: flutter pub get --enforce-lockfile
+      - name: Install pinned Apple tooling before loading signing secrets
+        run: |
+          export GEM_HOME="$RUNNER_TEMP/apple-gems"
+          export GEM_PATH="$GEM_HOME"
+          echo "GEM_HOME=$GEM_HOME" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$GEM_PATH" >> "$GITHUB_ENV"
+          gem install cocoapods --version 1.16.2 --no-document
+          gem install xcodeproj --version 1.27.0 --no-document
+          echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
+          ruby -e 'gem "xcodeproj", "1.27.0"; require "xcodeproj"'
+      - name: Archive, validate, export and optionally upload
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_UPLOAD: ${{ inputs.upload }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_P12_PASSWORD }}
+          APPLE_INSTALLER_P12_BASE64: ${{ secrets.APPLE_INSTALLER_P12_BASE64 }}
+          APPLE_INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_INSTALLER_P12_PASSWORD }}
+          APPLE_APP_PROFILE_BASE64: ${{ secrets.APPLE_APP_PROFILE_BASE64 }}
+          APPLE_WIDGET_PROFILE_BASE64: ${{ secrets.APPLE_WIDGET_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(release --target "$RELEASE_TARGET" --version "$RELEASE_VERSION"
+            --build "$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))")
+          if [[ "$RELEASE_UPLOAD" == true ]]; then args+=(--upload); fi
+          python3 deploy/apple_release.py "${args[@]}"
+      - name: Remove signing material even after failure
+        if: always()
+        run: python3 deploy/apple_release.py cleanup
+      - name: Upload only distribution outputs and symbols
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 
+        with:
+          name: apple-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/apple/artifacts/*.ipa
+            build/apple/artifacts/*.pkg
+            build/apple/artifacts/*.dmg
+            build/apple/artifacts/dSYMs.zip
+            build/apple/artifacts/release.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [quality, release]
+    if: inputs.publish_release && inputs.target != 'macos-testflight'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 
+        with:
+          persist-credentials: false
+      - name: Download only this run's verified distribution artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 
+        with:
+          pattern: apple-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-inputs
+      - name: Verify checksums and publish IPA/DMG without Apple keys
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TARGETS: ${{ needs.quality.outputs.targets }}
+        run: |
+          python3 deploy/publish_apple_release.py --artifacts build/release-inputs \
+            --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" \
+            --version "$RELEASE_VERSION" --targets "$RELEASE_TARGETS"

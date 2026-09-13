@@ -1,0 +1,5 @@
+# форма настроек доступна через закрытый unix сокет, без доступа приложения к docker и файлу .env хоста
+services:
+  server_advanced:
+    volumes:
+      - /run/reschool-settings:/run/reschool-settings:ro

@@ -1,0 +1,39 @@
+name: eSchool Version
+
+on:
+  schedule:
+    # раз в три дня, ночью по utc
+    - cron: '0 4 */3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: eschool-version
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Забрать версию из Google Play
+        run: node .github/scripts/fetch_eschool_version.mjs
+
+      # сервер ходит по ссылке releases/latest/download, поэтому файл
+      # должен лежать именно в последнем релизе
+      - name: Положить в последний релиз
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=$(gh release view --json tagName -q .tagName)
+          echo "последний релиз: $tag, версия $(cat eschool-version.txt)"
+          gh release upload "$tag" eschool-version.txt --clobber

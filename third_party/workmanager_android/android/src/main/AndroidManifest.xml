@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- служба удерживает процесс для долгих фоновых задач -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <!-- с android 14 каждому типу службы нужно отдельное разрешение
+    shortService объявлена всегда для срочных задач, а dataSync требует декларации и видео в play console
+    поэтому dataSync включается только явно через workmanager.enableDataSyncForegroundService=true -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE"/>
+    <application>
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="shortService"
+            tools:node="merge"
+            tools:targetApi="34"/>
+    </application>
+</manifest>

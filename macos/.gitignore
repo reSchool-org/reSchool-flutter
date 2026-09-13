@@ -1,0 +1,7 @@
+# всё, что относится к flutter
+**/Flutter/ephemeral/
+**/Pods/
+
+# всё, что относится к xcode
+**/dgph
+**/xcuserdata/

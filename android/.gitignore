@@ -1,0 +1,14 @@
+gradle-wrapper.jar
+/.gradle
+/captures/
+/gradlew
+/gradlew.bat
+/local.properties
+GeneratedPluginRegistrant.java
+.cxx/
+
+# хранилище ключей никогда никому не показываем
+# подробности есть в документации flutter про keystore
+key.properties
+**/*.keystore
+**/*.jks

@@ -1,0 +1,9 @@
+requests
+python-dotenv
+flask
+psycopg[binary,pool]
+redis
+pyTelegramBotAPI>=4.36.1,<5
+cryptography
+pymupdf
+pillow

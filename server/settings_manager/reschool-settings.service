@@ -1,0 +1,25 @@
+[Unit]
+Description=reSchool server configuration
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+User=root
+UMask=0077
+RuntimeDirectory=reschool-settings
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+WorkingDirectory=/opt/reschool
+ExecStart=/usr/bin/python3 /opt/reschool/settings_manager/manager.py --root /opt/reschool --socket-dir /run/reschool-settings --compose-file docker-compose.yml --compose-file docker-compose.override.yml --compose-file docker-compose.browser.yml --compose-file docker-compose.settings.yml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/reschool /run/reschool-settings
+
+[Install]
+WantedBy=multi-user.target

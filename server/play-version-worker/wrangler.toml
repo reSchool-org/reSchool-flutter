@@ -1,0 +1,12 @@
+name = "reschool-play-version"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+workers_dev = true
+
+[vars]
+DEFAULT_APP_ID = "ru.spb.itstrategy.mobilejournal"
+DEFAULT_LANG = "ru"
+DEFAULT_COUNTRY = "ru"
+CACHE_TTL_SECONDS = "86400"

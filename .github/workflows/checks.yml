@@ -1,0 +1,44 @@
+name: Quality Checks
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test
+
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: server
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install backend and browser transport dependencies
+        run: python3 -m pip install -r server/requirements.txt -r server/browser_transport/requirements.txt
+      - run: python3 -m unittest discover -s server/tests
+      - run: python3 -m unittest discover -s deploy/tests -v
+      - run: python3 .github/scripts/check_repository.py

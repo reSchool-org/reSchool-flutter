@@ -1,0 +1,46 @@
+.DS_Store
+.env
+*.log
+*.pyc
+*.zip
+__pycache__/
+
+play-version-worker/
+push-relay/
+
+server_advanced/.env
+server_advanced/.DS_Store
+server_advanced/__pycache__/
+server_advanced/**/*.pyc
+server_advanced/uploads/
+
+secrets/
+
+# локальные данные и секреты не должны попасть в образ из вложенных каталогов
+**/.env*
+**/*.env
+**/*.env.*
+**/runtime/
+**/uploads/
+**/secrets/
+**/sessions/
+# серверу не нужны файлы json, поэтому исключаем и произвольно названные ключи firebase и старые снимки сессий
+**/*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/.ssh/
+**/id_rsa*
+**/id_ed25519*
+**/*.bak
+**/*.bak.*
+**/*.backup
+**/*~
+**/__pycache__/
+**/*.pyc
+**/*.log
+
+# копии настроек для отката не должны попасть в контекст сборки
+backups/

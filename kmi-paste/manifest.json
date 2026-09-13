@@ -1,0 +1,10 @@
+{
+  "id": "kmi-paste",
+  "name": "KMI Paste",
+  "version": "1.1.0",
+  "minAppVersion": "0.15.0",
+  "description": "Open a URI link with file name, path, content from kmi.aeza.net and write it to a note",
+  "author": "kmi-plugin",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
