@@ -24,6 +24,7 @@ import 'chats_screen.dart';
 import '../utils/app_font.dart';
 import '../widgets/avatar_widget.dart';
 import 'profile_screen.dart';
+import 'chat_detail_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -35,6 +36,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   bool _updateCheckDone = false;
+  bool _navigationScheduled = false;
   final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   final List<Widget> _screens = [
@@ -58,7 +60,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _currentIndex = DiaryNavigationService.instance.pendingTab.value ?? 0;
     DiaryNavigationService.instance.pendingTab.addListener(_onPendingTabChange);
+    DiaryNavigationService.instance.pendingChat.addListener(
+      _onPendingTabChange,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       _onPendingTabChange();
       _refreshWidgets();
@@ -69,6 +75,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     DiaryNavigationService.instance.pendingTab.removeListener(
+      _onPendingTabChange,
+    );
+    DiaryNavigationService.instance.pendingChat.removeListener(
       _onPendingTabChange,
     );
     WidgetsBinding.instance.removeObserver(this);
@@ -98,10 +107,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _onPendingTabChange() {
-    final tab = DiaryNavigationService.instance.consumeTab();
-    if (tab != null && mounted) {
-      setState(() => _currentIndex = tab);
-    }
+    if (!mounted || _navigationScheduled) return;
+    _navigationScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _navigationScheduled = false;
+      if (!mounted) return;
+      final service = DiaryNavigationService.instance;
+      final tab = service.consumeTab();
+      final chat = service.pendingChat.value;
+      if (tab == null && chat == null) return;
+      final route = ModalRoute.of(context);
+      Navigator.of(context)
+          .popUntil((candidate) => candidate == route || candidate.isFirst);
+      if (tab != null) setState(() => _currentIndex = tab);
+      if (chat != null) {
+        service.pendingChat.value = null;
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ChatDetailScreen(
+              threadId: chat.threadId,
+              title: chat.title,
+              isGroup: chat.isGroup,
+              initialMessageNumber: chat.messageNumber,
+            ),
+          ),
+        );
+      }
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   Future<void> _checkForUpdates() async {

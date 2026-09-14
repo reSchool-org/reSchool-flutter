@@ -11,6 +11,7 @@ from html import escape as html_escape
 from contextlib import ExitStack
 from types import SimpleNamespace
 from .school_dates import school_date, SCHOOL_TIMEZONE
+from .notification_links import notification_open_url
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 from telebot import TeleBot
@@ -19,11 +20,12 @@ from telebot.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton,
 
 from .config import API_TOKEN, USER_AGENT, get_public_base_url
 from .logging_utils import log
-from .database import get_db_connection, load_user_session
+from .database import get_db_connection
 from .chat_notifications import fetch_threads, ChatSessionExpired
-from .encryption import decrypt_password, init_encryption
+from .encryption import decrypt_password, encrypt_password, init_encryption
 from . import telegram_formatting as presentation
 from .telegram_delivery import send_card, edit_card
+from .telegram_diagnostics import delivery_log, error_details
 
 
 # живые боты, по одному на регистрацию
@@ -69,8 +71,8 @@ def _menu_keyboard():
     return markup
 
 
-def _get_user_credentials(registration_id: str):
-    """расшифровываем данные входа зарегистрированного пользователя"""
+def _get_user_session(registration_id: str):
+    """вход с паролем требует явного действия, здесь читаем только готовую сессию"""
     conn = get_db_connection()
     if not conn:
         return None, None, None, "Ошибка подключения к базе данных"
@@ -78,7 +80,7 @@ def _get_user_credentials(registration_id: str):
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT username, password_encrypted, selected_period_id, selected_period_name,
+            SELECT username, selected_period_id, selected_period_name,
                    session_invalid, session_invalid_reason
             FROM cf3_registrations WHERE id = %s
         """, (registration_id,))
@@ -94,13 +96,12 @@ def _get_user_credentials(registration_id: str):
             log(f"[Telegram] Access blocked for invalid session {registration_id}: {reason}")
             return None, None, reg, SESSION_LOGIN_INSTRUCTIONS
 
-        # расшифровываем пароль
-        init_encryption()
-        password = decrypt_password(reg['password_encrypted'])
-        if not password:
-            return None, None, None, "Ошибка расшифровки пароля"
-
-        return reg['username'], password, reg, None
+        from .keep_alive import get_session, mark_account_session_invalid
+        cookies = get_session(registration_id)
+        if not cookies:
+            mark_account_session_invalid(registration_id, reg['username'], 'session_missing', notify=True)
+            return None, None, reg, SESSION_LOGIN_INSTRUCTIONS
+        return reg['username'], cookies, reg, None
 
     except Exception as e:
         log(f"[Telegram] Error getting credentials: {type(e).__name__}")
@@ -110,14 +111,18 @@ def _get_user_credentials(registration_id: str):
 def _get_user_data_for_telegram(registration_id: str):
     """читаем задания, оценки и сообщения зарегистрированного пользователя"""
     # импорт тут, иначе получится циклический
-    from .routes.notifications import login_and_get_data
+    from .routes.notifications import fetch_data_with_session
+    from .keep_alive import mark_account_session_invalid
 
-    username, password, _, error = _get_user_credentials(registration_id)
+    username, cookies, _, error = _get_user_session(registration_id)
     if error:
         return None, None, None, None, error
 
     # тянем данные из eSchool
-    homework, grades, messages, first_name, _, _ = login_and_get_data(username, password)
+    homework, grades, messages, first_name, expired, _ = fetch_data_with_session(cookies, username)
+    if expired:
+        mark_account_session_invalid(registration_id, username, 'session_expired', notify=True)
+        return None, None, None, None, SESSION_LOGIN_INSTRUCTIONS
 
     if homework is None:
         return None, None, None, None, "Не удалось получить данные. Попробуйте позже."
@@ -129,11 +134,11 @@ def _get_periods_for_telegram(registration_id: str):
     """получаем доступные периоды зарегистрированного пользователя"""
     from .routes.notifications import get_periods_for_user
 
-    username, password, reg, error = _get_user_credentials(registration_id)
+    username, cookies, reg, error = _get_user_session(registration_id)
     if error:
         return None, None, error
 
-    periods, _, error = get_periods_for_user(username, password)
+    periods, _, error = get_periods_for_user(cookies, registration_id)
     if error:
         return None, None, error
 
@@ -147,7 +152,7 @@ def _get_grades_for_period_telegram(registration_id: str, period_id: int = None)
     """читаем оценки за выбранный период"""
     from .routes.notifications import get_grades_for_period, get_periods_for_user
 
-    username, password, reg, error = _get_user_credentials(registration_id)
+    username, cookies, reg, error = _get_user_session(registration_id)
     if error:
         return None, None, error
 
@@ -157,7 +162,9 @@ def _get_grades_for_period_telegram(registration_id: str, period_id: int = None)
 
     # если и его нет, ищем текущий
     if period_id is None:
-        periods, _, _ = get_periods_for_user(username, password)
+        periods, _, error = get_periods_for_user(cookies, registration_id)
+        if error:
+            return None, None, error
         if periods:
             # ищем текущий
             for p in periods:
@@ -171,7 +178,7 @@ def _get_grades_for_period_telegram(registration_id: str, period_id: int = None)
     if period_id is None:
         return None, None, "Не удалось определить период"
 
-    grades, period_name, _, error = get_grades_for_period(username, password, period_id)
+    grades, period_name, _, error = get_grades_for_period(cookies, period_id, registration_id)
     if error:
         return None, None, error
 
@@ -222,7 +229,7 @@ def send_session_invalid_message(registration_id: str, username: str = None, rea
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT COALESCE(cf3_account_primary(id), id) = id AS telegram_delivery_primary,
-                   cloud_role, username, telegram_enabled, telegram_bot_token, telegram_user_id
+                   cloud_role, username, telegram_enabled, telegram_bot_token, telegram_user_id, session_invalid_at
             FROM cf3_registrations WHERE id = %s
         """, (registration_id,))
         reg = cursor.fetchone()
@@ -241,7 +248,6 @@ def send_session_invalid_message(registration_id: str, username: str = None, rea
 
     account = username or reg.get('username') or registration_id
     try:
-        bot = TeleBot(reg['telegram_bot_token'])
         card = presentation.Card('🔑 Нужно войти в eSchool').fact('Аккаунт', account)
         card.text('Подключение истекло. Проверка домашних заданий, оценок и сообщений приостановлена до повторного входа.')
         markup = InlineKeyboardMarkup()
@@ -250,9 +256,14 @@ def send_session_invalid_message(registration_id: str, username: str = None, rea
         if reg.get('cloud_role') == 'user':
             card.text('Обновите пароль во вкладке облачных функций reSchool.')
             markup = None
-        _send_text(bot, reg['telegram_user_id'], card, reply_markup=markup)
-        log(f"[Telegram] Session invalid notice sent for {registration_id}")
-        return True
+        ok = send_telegram_message(
+            reg['telegram_bot_token'], reg['telegram_user_id'], '🔑 Нужно войти в eSchool',
+            '\n\n'.join(plain for _, plain in card.parts),
+            notification_type='session_invalid',
+            notification_data={'id': registration_id[:8], 'revision': str(reg.get('session_invalid_at') or '')},
+            reply_markup_data=markup.to_dict() if markup else None, durable=True)
+        log(f"[Telegram] Session invalid notice queued={ok} for {registration_id}")
+        return ok
     except Exception as e:
         log(f"[Telegram] Error sending session-invalid notice: {type(e).__name__}")
         return False
@@ -390,6 +401,44 @@ def _owner_callback(call, user_id):
             and str(call.from_user.id) == str(user_id))
 
 
+def _resolve_bot_registration(message, registration_id, owner_user_id, bot_token):
+    """личная команда общего бота должна использовать только аккаунт отправителя"""
+    chat = getattr(message, 'chat', None)
+    sender = getattr(message, 'from_user', None)
+    if (chat is None or sender is None or chat.type != 'private'
+            or str(chat.id) != str(sender.id)):
+        return None
+    if str(sender.id) == str(owner_user_id):
+        return registration_id if registration_id != '__server__' else None
+
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('Database unavailable for Telegram authorization')
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        # отозванные подключения и регистрации другого бота не дают доступа
+        cursor.execute('''SELECT r.id, b.token_encrypted
+            FROM cf3_registrations r
+            JOIN classmate_registrations m ON m.monitoring_registration_id = r.id
+            CROSS JOIN cloud_server_bot b
+            WHERE r.telegram_user_id = %s AND r.cloud_role = 'user' AND b.id = 1''',
+            (str(sender.id),))
+        rows = cursor.fetchall()
+        if len(rows) != 1:
+            delivery_log(log, 'bot_binding_denied', chat_id=chat.id,
+                         reason='ambiguous_account' if rows else 'no_linked_account')
+            return None
+        if decrypt_password(rows[0]['token_encrypted']) != bot_token:
+            delivery_log(log, 'bot_binding_denied', chat_id=chat.id, reason='different_bot')
+            return None
+        return rows[0]['id']
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
+
+
 def _format_homework_message(homework_list: list, limit: int = 10):
     return presentation.homework(homework_list[:limit], datetime.now())
 
@@ -425,28 +474,25 @@ def _messages_page(messages, page=0):
 
 
 def _get_messages_for_telegram(registration_id):
-    # просмотр бесед использует действующую сессию и не запрашивает весь дневник
-    cookies = load_user_session(registration_id)
-    if cookies:
-        try:
-            headers = {
-                'Accept': 'application/json, text/plain, */*',
-                'User-Agent': USER_AGENT,
-                'Origin': 'https://app.eschool.center',
-                'Referer': 'https://app.eschool.center/',
-            }
-            return fetch_threads(cookies, headers), None
-        except ChatSessionExpired:
-            return None, 'Не удалось подтвердить вход в eSchool. Используйте /retry для повторного подключения.'
-        except Exception as error:
-            log(f'[Telegram] Conversation list unavailable: {type(error).__name__}')
-            return None, 'Не удалось загрузить список бесед. Попробуйте ещё раз.'
-    _, _, messages, _, error = _get_user_data_for_telegram(registration_id)
+    # просмотр бесед не должен запускать вход или отменять ручную остановку аккаунта
+    username, cookies, _, error = _get_user_session(registration_id)
     if error:
         return None, error
-    if messages is None:
+    try:
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'User-Agent': USER_AGENT,
+            'Origin': 'https://app.eschool.center',
+            'Referer': 'https://app.eschool.center/',
+        }
+        return fetch_threads(cookies, headers), None
+    except ChatSessionExpired:
+        from .keep_alive import mark_account_session_invalid
+        mark_account_session_invalid(registration_id, username, 'session_expired', notify=True)
+        return None, SESSION_LOGIN_INSTRUCTIONS
+    except Exception as error:
+        log(f'[Telegram] Conversation list unavailable: {type(error).__name__}')
         return None, 'Не удалось загрузить список бесед. Попробуйте ещё раз.'
-    return messages, None
 
 
 def _button_markup(deep_link_url):
@@ -494,7 +540,7 @@ def _download_attachment(url, attachment_headers, attachment_cookies, name=None)
         return file_buffer
 
 
-def _rich_attachments(items, stack, headers, cookies):
+def _rich_attachments(items, stack, headers, cookies, delivery_id=None):
     media, files, blocks, prepared, failed = [], {}, [], [], []
     photos = []
     for index, item in enumerate(items[:20]):
@@ -534,7 +580,8 @@ def _rich_attachments(items, stack, headers, cookies):
             prepared.append(item)
         except Exception as error:
             failed.append(name)
-            log(f'[Telegram] Attachment preparation failed: {type(error).__name__}')
+            delivery_log(log, 'attachment_preparation_failed', delivery_id=delivery_id,
+                         attachment_index=index, **error_details(error))
     if len(photos) > 1:
         blocks.insert(0, '<tg-collage>' + ''.join(photos) + '</tg-collage>')
     elif photos:
@@ -542,9 +589,16 @@ def _rich_attachments(items, stack, headers, cookies):
     return media, files, blocks, prepared, failed
 
 
-def _send_remaining_attachments(bot, user_id, items, headers, cookies, message_thread_id):
+def _send_remaining_attachments(bot, user_id, items, headers, cookies, message_thread_id, delivery_id=None,
+                                progress=None, checkpoint=None, indexes=None, raise_errors=False):
     sent = 0
-    for attachment in items:
+    progress = progress if progress is not None else {}
+    completed = progress.setdefault('attachments_done', [])
+    for index, attachment in enumerate(items):
+        original_index = indexes[index] if indexes is not None else index
+        if original_index in completed:
+            sent += 1
+            continue
         local_path = attachment.get('path') or attachment.get('local_path')
         url = attachment.get('url')
         name = presentation.label(attachment.get('name') or 'Вложение', 240)
@@ -556,17 +610,30 @@ def _send_remaining_attachments(bot, user_id, items, headers, cookies, message_t
         try:
             if local_path and os.path.isfile(local_path):
                 with open(local_path, 'rb') as stream:
-                    method(**{argument: stream}, **kwargs)
+                    result = method(**{argument: stream}, **kwargs)
             elif url and (headers or cookies):
                 with _download_attachment(url, headers, cookies, name) as stream:
-                    method(**{argument: stream}, **kwargs)
+                    result = method(**{argument: stream}, **kwargs)
             elif url:
-                method(**{argument: url}, **kwargs)
+                result = method(**{argument: url}, **kwargs)
             else:
+                if raise_errors:
+                    raise FileNotFoundError('Attachment source unavailable')
                 continue
             sent += 1
+            delivery_log(log, 'attachment_delivered', delivery_id=delivery_id,
+                         chat_id=str(user_id), topic_id=message_thread_id,
+                         attachment_index=index, message_id=result.message_id)
+            completed.append(original_index)
+            progress.setdefault('attachment_message_ids', []).append(result.message_id)
+            if checkpoint:
+                checkpoint(progress)
         except Exception as error:
-            log(f'[Telegram] Attachment delivery failed: {type(error).__name__}')
+            delivery_log(log, 'attachment_delivery_failed', delivery_id=delivery_id,
+                         chat_id=str(user_id), topic_id=message_thread_id,
+                         attachment_index=index, **error_details(error, (bot.token,)))
+            if raise_errors:
+                raise
     return sent
 
 
@@ -583,32 +650,90 @@ def send_telegram_message(
     notification_type: str = None,
     notification_data: dict = None,
     analysis_data: dict = None,
+    require_complete: bool = False,
+    reply_markup_data=None,
+    durable: bool = False,
+    progress=None,
+    checkpoint=None,
+    raise_errors=False,
+    delivery_id=None,
 ) -> bool:
+    if deep_link_url is None:
+        deep_link_url = notification_open_url(notification_type, notification_data)
+    if durable:
+        from .telegram_outbox import enqueue_telegram_message
+        return enqueue_telegram_message(
+            bot_token, user_id, title, body, attachments=attachments,
+            attachment_headers=attachment_headers, attachment_cookies=attachment_cookies,
+            message_thread_id=message_thread_id, deep_link_url=deep_link_url,
+            notification_type=notification_type, notification_data=notification_data,
+            analysis_data=analysis_data, require_complete=True, reply_markup_data=reply_markup_data)
+    delivery_id = delivery_id or secrets.token_hex(8)
+    progress = progress if progress is not None else {}
+    resuming_card = bool(progress.get('card_complete'))
+    data = notification_data if isinstance(notification_data, dict) else {}
+    context = {'delivery_id': delivery_id, 'chat_id': str(user_id), 'topic_id': message_thread_id,
+               'notification_type': notification_type, 'source_id': data.get('id'),
+               'homework_id': data.get('id') if notification_type == 'homework' else None,
+               'analysis_id': data.get('analysisId')}
     if not bot_token or not user_id:
+        delivery_log(log, 'notification_skipped', **context, reason='missing_bot_or_chat')
         return False
+    started = time.monotonic()
+    stage = 'prepare'
     try:
         bot = TeleBot(bot_token)
         card = presentation.notification(title, body, notification_type, notification_data, analysis_data)
         items = [item for item in (attachments or []) if isinstance(item, dict)]
+        delivery_log(log, 'notification_started', **context, attachment_count=len(items),
+                     local_count=sum(bool(i.get('path') or i.get('local_path')) for i in items),
+                     url_count=sum(bool(i.get('url')) for i in items))
         with ExitStack() as stack:
             media, files, blocks, prepared, failed = _rich_attachments(
-                items, stack, attachment_headers, attachment_cookies)
+                [] if progress.get('card_complete') else items, stack, attachment_headers, attachment_cookies, delivery_id)
+            if failed and raise_errors:
+                raise OSError('Attachment preparation failed; inspect attachment_preparation_failed events')
             if blocks:
                 # медиа держим одним блоком в конце, чтобы все ссылки и загрузки попали на одну страницу
                 card.parts.insert(-1, ('\n\n'.join(blocks), '📎 ' + ', '.join(
                     presentation.label(item.get('name') or 'Вложение', 80) for item in prepared)))
             if failed:
                 card.text('📎 Не удалось загрузить: ' + ', '.join(failed) + '. Вложения доступны в reSchool.')
+            stage = 'send_card'
             delivery = send_card(bot, user_id, card, message_thread_id=message_thread_id,
-                                 reply_markup=_button_markup(deep_link_url), media=media, files=files)
-        remaining = (prepared if not delivery.media_sent else []) + items[20:]
-        if remaining:
-            _send_remaining_attachments(bot, user_id, remaining, attachment_headers,
-                                        attachment_cookies, message_thread_id)
-        log('[Telegram] Notification delivered')
-        return True
+                                 reply_markup=InlineKeyboardMarkup.de_json(reply_markup_data) if reply_markup_data else _button_markup(deep_link_url),
+                                 media=media, files=files,
+                                 delivery_id=delivery_id, progress=progress, checkpoint=checkpoint)
+        if delivery.media_sent:
+            done = progress.setdefault('attachments_done', [])
+            for index in range(min(20, len(items))):
+                if index not in done:
+                    done.append(index)
+            if checkpoint:
+                checkpoint(progress)
+        remaining_indices = [index for index in range(len(items))
+                             if index not in progress.get('attachments_done', [])
+                             and (raise_errors or resuming_card or index >= 20 or items[index] in prepared)]
+        remaining = [items[index] for index in remaining_indices]
+        stage = 'send_remaining_attachments'
+        sent_remaining = _send_remaining_attachments(
+            bot, user_id, remaining, attachment_headers, attachment_cookies,
+            message_thread_id, delivery_id, progress, checkpoint, remaining_indices,
+            raise_errors) if remaining else 0
+        complete = not failed and sent_remaining == len(remaining)
+        delivery_log(log, 'notification_delivered' if complete else 'notification_partial',
+                     **context, message_ids=delivery.message_ids, rich=delivery.rich,
+                     media_sent=delivery.media_sent, failed_attachments=len(failed) + len(remaining) - sent_remaining,
+                     elapsed_ms=round((time.monotonic() - started) * 1000))
+        # старым вызовам достаточно доставить текст, а очереди своих дз
+        # нужно ещё подтверждение всех вложений
+        return complete or not require_complete
     except Exception as error:
-        log(f'[Telegram] Notification failed: {type(error).__name__}')
+        delivery_log(log, 'notification_failed', **context, stage=stage,
+                     elapsed_ms=round((time.monotonic() - started) * 1000),
+                     **error_details(error, (bot_token,)))
+        if raise_errors:
+            raise
         return False
 
 
@@ -894,6 +1019,21 @@ def _handle_activate_command(message: Message, registration_id: str, owner_user_
         log(f"[Telegram] Error handling /activate command: {type(e).__name__}")
 
 
+def send_group_connected_notice(registration_id, group_chat_id, group_title, *, connection=None):
+    """с переданным соединением подтверждение владельцу ждёт фиксации настроек"""
+    from .notification_delivery import get_telegram_info
+    from .telegram_outbox import enqueue_telegram_message
+    info = get_telegram_info(registration_id) or {}
+    return enqueue_telegram_message(
+        info.get('telegram_bot_token'), info.get('telegram_user_id'),
+        f'✅ Группа «{group_title or group_chat_id}» подключена для уведомлений.',
+        'В группу идут только ДЗ и уведомления о новых оценках (без значения).',
+        notification_type='group_connected',
+        notification_data={'id': registration_id, 'groupChatId': str(group_chat_id),
+                           'revision': secrets.token_hex(16)},
+        require_complete=True, connection=connection)
+
+
 def _handle_list_subjects_command(message: Message, registration_id: str):
     """предметы с идентификаторами показываем в личной переписке"""
     try:
@@ -903,12 +1043,12 @@ def _handle_list_subjects_command(message: Message, registration_id: str):
         bot = TeleBot(bot_token)
 
         from .routes.notifications import get_subjects_for_user
-        username, password, _, credentials_error = _get_user_credentials(registration_id)
+        username, cookies, _, credentials_error = _get_user_session(registration_id)
         if credentials_error:
             _send_text(bot, message.chat.id, f"❌ {credentials_error}")
             return
 
-        subjects, error = get_subjects_for_user(username, password)
+        subjects, error = get_subjects_for_user(cookies, registration_id)
         if error:
             _send_text(bot, message.chat.id, f"❌ {error}")
             return
@@ -1324,48 +1464,65 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
     try:
         bot = TeleBot(bot_token)
         _active_bots[registration_id] = bot
+        access_error = object()
 
-        @bot.message_handler(commands=['passwd', 'changepassword'])
-        def changepassword_handler(message: Message):
-            if str(message.chat.id) == str(user_id) and message.chat.type == 'private':
-                _handle_changepassword_command(message, registration_id)
+        def resolve_message(message, action):
+            try:
+                target = _resolve_bot_registration(message, registration_id, user_id, bot_token)
+            except Exception as error:
+                delivery_log(log, 'bot_access_error', chat_id=message.chat.id,
+                             action=action, **error_details(error, (bot_token,)))
+                return access_error
+            delivery_log(log, 'bot_access_allowed' if target else 'bot_access_denied',
+                         chat_id=message.chat.id, action=action, registration_id=target)
+            return target
 
-        @bot.message_handler(commands=['cancel'])
-        def cancel_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_cancel_command(message, registration_id)
+        def resolve_callback(call):
+            if getattr(call, 'message', None) is None:
+                return None
+            # сообщение с кнопкой отправил бот, пользователя берём из call.from_user
+            message = SimpleNamespace(chat=call.message.chat, from_user=call.from_user)
+            target = resolve_message(message, (call.data or '').split(':', 1)[0])
+            if target is access_error:
+                bot.answer_callback_query(call.id, 'Не удалось проверить доступ. Попробуйте позже.')
+                return None
+            if not target:
+                bot.answer_callback_query(call.id, 'Аккаунт не подключён к этому боту. Проверьте Telegram ID в reSchool.')
+            return target
 
-        @bot.message_handler(commands=['retry'])
-        def retry_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_retry_command(message, registration_id)
+        personal_commands = {
+            'passwd': _handle_changepassword_command, 'changepassword': _handle_changepassword_command,
+            'cancel': _handle_cancel_command, 'retry': _handle_retry_command,
+            'start': _handle_start_command, 'status': _handle_status_command, 'help': _handle_help_command,
+            'homework': _handle_homework_command, 'dz': _handle_homework_command,
+            'grades': _handle_grades_command, 'marks': _handle_grades_command, 'ocenki': _handle_grades_command,
+            'messages': _handle_messages_command, 'msg': _handle_messages_command, 'period': _handle_period_command,
+        }
 
-        @bot.message_handler(commands=['start'])
-        def start_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_start_command(message, registration_id)
-            elif message.chat.type == 'private':
-                _send_text(bot, message.chat.id, presentation.Card('reSchool').fact('Ваш Telegram ID', str(message.from_user.id)).text('Введите его в reSchool, чтобы получать личные уведомления.'))
+        @bot.message_handler(commands=list(personal_commands))
+        def personal_handler(message: Message):
+            if message.chat.type != 'private':
+                return
+            action = message.text.split()[0][1:].split('@', 1)[0].lower()
+            target = resolve_message(message, action)
+            if target is access_error:
+                _send_text(bot, message.chat.id, 'Не удалось проверить доступ. Попробуйте позже.')
+            elif target:
+                personal_commands[action](message, target)
+            else:
+                _send_text(bot, message.chat.id, presentation.Card('reSchool').fact('Ваш Telegram ID', str(message.from_user.id)).text('Введите его в reSchool, чтобы подключить аккаунт к боту.'))
 
-        @bot.message_handler(commands=['status'])
-        def status_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_status_command(message, registration_id)
-
-        @bot.message_handler(commands=['help'])
-        def help_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_help_command(message, registration_id)
-
-        @bot.message_handler(commands=['gen'])
-        def gen_handler(message: Message):
-            if str(message.chat.id) == str(user_id) and message.chat.type == 'private':
-                _handle_gen_command(message, registration_id)
-
-        @bot.message_handler(commands=['l'])
-        def list_subjects_handler(message: Message):
-            if str(message.chat.id) == str(user_id) and message.chat.type == 'private':
-                _handle_list_subjects_command(message, registration_id)
+        @bot.message_handler(commands=['gen', 'l'])
+        def group_settings_handler(message: Message):
+            if message.chat.type != 'private':
+                return
+            if not _owner_callback(SimpleNamespace(message=message, from_user=message.from_user), user_id):
+                delivery_log(log, 'bot_access_denied', chat_id=message.chat.id, action='group_settings',
+                             reason='owner_required')
+                _send_text(bot, message.chat.id, 'Группу настраивает администратор сервера. Личный дневник доступен через /start.')
+                return
+            action = message.text.split()[0][1:].split('@', 1)[0].lower()
+            (_handle_gen_command if action == 'gen' else _handle_list_subjects_command)(message, registration_id)
 
         @bot.message_handler(commands=['activate'])
         def activate_handler(message: Message):
@@ -1375,34 +1532,15 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
         def topic_bind_handler(message: Message):
             _handle_topic_bind_command(message, registration_id, str(user_id))
 
-        @bot.message_handler(commands=['homework', 'dz'])
-        def homework_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_homework_command(message, registration_id)
-
-        @bot.message_handler(commands=['grades', 'marks', 'ocenki'])
-        def grades_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_grades_command(message, registration_id)
-
-        @bot.message_handler(commands=['messages', 'msg'])
-        def messages_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_messages_command(message, registration_id)
-
-        @bot.message_handler(commands=['period'])
-        def period_handler(message: Message):
-            if str(message.chat.id) == str(user_id):
-                _handle_period_command(message, registration_id)
-
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('preview:'))
         def preview_handler(call):
-            if _owner_callback(call, user_id):
+            if resolve_callback(call):
                 bot.answer_callback_query(call.id, 'Это тестовая карточка. Настройки не изменены.')
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('menu:'))
         def menu_handler(call):
-            if not _owner_callback(call, user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             action = call.data.split(':', 1)[1]
             handlers = {
@@ -1418,11 +1556,12 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
             message = SimpleNamespace(chat=call.message.chat, from_user=call.from_user,
                                       message_id=call.message.message_id, text='/' + action,
                                       message_thread_id=getattr(call.message, 'message_thread_id', None))
-            handlers[action](message, registration_id)
+            handlers[action](message, target_registration_id)
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('messages_page:'))
         def messages_nav_handler(call):
-            if not _owner_callback(call, user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             value = call.data.split(':', 1)[1]
             if not value.isascii() or not value.isdigit() or len(value) > 6:
@@ -1430,7 +1569,7 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                 return
             bot.answer_callback_query(call.id)
             try:
-                messages, error = _get_messages_for_telegram(registration_id)
+                messages, error = _get_messages_for_telegram(target_registration_id)
                 if error:
                     _send_text(bot, call.message.chat.id, f'❌ {error}')
                     return
@@ -1442,7 +1581,8 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('period:'))
         def period_select_handler(call):
-            if not _owner_callback(call, user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             value = call.data.split(':', 1)[1]
             if not value.isascii() or not value.isdigit():
@@ -1452,11 +1592,12 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
             message = SimpleNamespace(chat=call.message.chat, from_user=call.from_user,
                                       message_id=call.message.message_id, text='/period ' + value,
                                       message_thread_id=getattr(call.message, 'message_thread_id', None))
-            _handle_period_command(message, registration_id)
+            _handle_period_command(message, target_registration_id)
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith(('hw_date:', 'hw_page:')))
         def homework_nav_handler(call):
-            if not _owner_callback(call, user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             parts = call.data.split(':')
             try:
@@ -1466,7 +1607,7 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                 bot.answer_callback_query(call.id, 'Неверная дата')
                 return
             bot.answer_callback_query(call.id)
-            homework, _, _, _, error = _get_user_data_for_telegram(registration_id)
+            homework, _, _, _, error = _get_user_data_for_telegram(target_registration_id)
             if error:
                 _send_text(bot, call.message.chat.id, 'Не удалось загрузить домашние задания. Попробуйте ещё раз.')
                 return
@@ -1479,30 +1620,39 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('session_stop:'))
         def session_stop_handler(call):
-            if str(call.message.chat.id) != str(user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             callback_registration_id = call.data.split(':', 1)[1]
-            if callback_registration_id != registration_id:
+            if callback_registration_id != target_registration_id:
+                delivery_log(log, 'bot_access_denied', chat_id=call.message.chat.id,
+                             action='session_stop', reason='different_account')
                 bot.answer_callback_query(call.id, "Неверная кнопка")
                 return
-            _handle_session_stop_action(bot, call, registration_id)
+            _handle_session_stop_action(bot, call, target_registration_id)
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('session_login:'))
         def session_login_handler(call):
-            if str(call.message.chat.id) != str(user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             callback_registration_id = call.data.split(':', 1)[1]
-            if callback_registration_id != registration_id:
+            if callback_registration_id != target_registration_id:
+                delivery_log(log, 'bot_access_denied', chat_id=call.message.chat.id,
+                             action='session_login', reason='different_account')
                 bot.answer_callback_query(call.id, "Неверная кнопка")
                 return
-            _handle_session_login_action(bot, call, registration_id)
+            _handle_session_login_action(bot, call, target_registration_id)
 
         @bot.callback_query_handler(func=lambda call: (call.data or '').startswith('session_retry:'))
         def session_retry_handler(call):
-            if str(call.message.chat.id) != str(user_id):
+            target_registration_id = resolve_callback(call)
+            if not target_registration_id:
                 return
             callback_registration_id = call.data.split(':', 1)[1]
-            if callback_registration_id != registration_id:
+            if callback_registration_id != target_registration_id:
+                delivery_log(log, 'bot_access_denied', chat_id=call.message.chat.id,
+                             action='session_retry', reason='different_account')
                 bot.answer_callback_query(call.id, "Неверная кнопка")
                 return
             bot.answer_callback_query(call.id, "⏳ Подключаюсь...")
@@ -1514,23 +1664,29 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                 )
             except Exception:
                 pass
-            _perform_retry_session(bot, call.message.chat.id, registration_id)
+            _perform_retry_session(bot, call.message.chat.id, target_registration_id)
 
         @bot.message_handler(func=lambda m: True)
         def echo_handler(message: Message):
             # ждём смену пароля: следующее сообщение в личке считаем новым паролем
-            if (str(message.chat.id) == str(user_id)
+            target_registration_id = None
+            if message.chat.type == 'private':
+                target_registration_id = resolve_message(message, 'text')
+                if target_registration_id is access_error:
+                    _send_text(bot, message.chat.id, 'Не удалось проверить доступ. Попробуйте позже.')
+                    return
+            if (target_registration_id
                     and message.chat.type == 'private'
                     and message.text
                     and not message.text.startswith('/')):
                 with _pending_password_changes_lock:
-                    entry = _pending_password_changes.get(registration_id)
+                    entry = _pending_password_changes.get(target_registration_id)
                     if entry:
                         if datetime.now() > entry['expires_at']:
-                            del _pending_password_changes[registration_id]
+                            del _pending_password_changes[target_registration_id]
                             _reply_text(bot, message, "⏰ Время ожидания истекло. Отправьте /passwd снова.")
                             return
-                        del _pending_password_changes[registration_id]
+                        del _pending_password_changes[target_registration_id]
 
                 if entry and datetime.now() <= entry['expires_at']:
                     new_pw = message.text.strip()
@@ -1543,7 +1699,7 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                     if conn_pw:
                         try:
                             cur_pw = conn_pw.cursor(dictionary=True)
-                            cur_pw.execute("SELECT username FROM cf3_registrations WHERE id = %s", (registration_id,))
+                            cur_pw.execute("SELECT username FROM cf3_registrations WHERE id = %s", (target_registration_id,))
                             row_pw = cur_pw.fetchone()
                             cur_pw.close()
                             conn_pw.close()
@@ -1580,7 +1736,7 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                                 session_invalid_reason = NULL,
                                 session_invalid_at = NULL
                             WHERE id = %s
-                        """, (encrypted_pw, registration_id))
+                        """, (encrypted_pw, target_registration_id))
                         conn_upd.commit()
                         cur_upd.close()
                     except Exception as e:
@@ -1590,8 +1746,8 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                     finally:
                         conn_upd.close()
 
-                    update_session(registration_id, cookies_pw)
-                    log(f"[Telegram] Password changed via /passwd for {registration_id} ({username_pw})")
+                    update_session(target_registration_id, cookies_pw)
+                    log(f"[Telegram] Password changed via /passwd for {target_registration_id} ({username_pw})")
                     _send_text(bot, message.chat.id, "✅ Пароль обновлён, мониторинг возобновлён!")
                     return
 
@@ -1634,7 +1790,7 @@ def _bot_polling_loop(registration_id: str, bot_token: str, user_id: str):
                             pass
                         return
 
-            if str(message.chat.id) == str(user_id):
+            if target_registration_id:
                 _reply_text(bot, message, "Используйте /help для списка команд.")
             else:
                 log(f"[Telegram] Ignored message from unauthorized user: {message.chat.id}")

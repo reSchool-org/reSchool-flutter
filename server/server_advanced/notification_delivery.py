@@ -1,8 +1,11 @@
 import json
+import hashlib
 from datetime import datetime
 
 from .database import get_db_connection, json_value
 from .logging_utils import log
+from .telegram_diagnostics import delivery_log
+from .notification_links import notification_open_url
 
 
 def save_notification_history(registration_id, notification_type, title, body, data=None):
@@ -12,6 +15,19 @@ def save_notification_history(registration_id, notification_type, title, body, d
         return False
     try:
         with conn.cursor() as cursor:
+            source_id = str((data or {}).get('messageId') or (data or {}).get('id') or '')
+            cursor.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))',
+                           (f'history:{registration_id}:{notification_type}:{source_id}',))
+            cursor.execute('''
+                SELECT title, body, data FROM cf3_notification_history
+                WHERE registration_id = %s AND notification_type = %s
+                  AND COALESCE(data->>'messageId', data->>'id', '') = %s
+                ORDER BY id DESC LIMIT 1
+            ''', (registration_id, notification_type, source_id))
+            previous = cursor.fetchone()
+            if previous and tuple(previous) == (title, body, data or None):
+                conn.commit()
+                return True
             cursor.execute("""
                 INSERT INTO cf3_notification_history (registration_id, notification_type, title, body, data)
                 VALUES (%s, %s, %s, %s, %s)
@@ -40,11 +56,26 @@ def send_notification_with_telegram(
     """сохраняем уведомление локально и доставляем через настроенного бота телеграма"""
     history_result = bool(registration_id) and save_notification_history(
         registration_id, notification_type, title, body, data)
-    telegram_result = False
+    telegram_result = True
 
     # смотрим, включён ли телеграм у этой регистрации
     if registration_id:
         telegram_info = get_telegram_info(registration_id)
+        if telegram_info is None:
+            delivery_log(log, 'enqueue_failed', reason='telegram_settings_unavailable',
+                         registration=registration_id[:8], notification_type=notification_type)
+            return False
+        active = telegram_info.get('telegram_enabled') and telegram_info.get('telegram_delivery_primary', True)
+        if active and (not telegram_info.get('telegram_bot_token') or not (
+                telegram_info.get('telegram_user_id') or (telegram_info.get('telegram_group_enabled')
+                                                        and telegram_info.get('telegram_group_chat_id')))):
+            delivery_log(log, 'enqueue_failed', reason='incomplete_telegram_settings',
+                         registration=registration_id[:8], notification_type=notification_type)
+            return False
+        if not active:
+            delivery_log(log, 'destination_skipped', registration=registration_id[:8],
+                         notification_type=notification_type,
+                         reason='disabled' if not telegram_info.get('telegram_enabled') else 'secondary_registration')
         if (telegram_info and telegram_info.get('telegram_enabled')
                 and telegram_info.get('telegram_delivery_primary', True)
                 and telegram_info.get('telegram_bot_token')):
@@ -54,14 +85,7 @@ def send_notification_with_telegram(
                 # кнопка ведёт на страницу /open, она уже перебрасывает в приложение:
                 # схему reschool:// телеграм в кнопках не принимает и отбивает
                 # всё сообщение целиком
-                hw_deep_link = None
-                if notification_type == 'homework' and isinstance(data, dict):
-                    hw_date = data.get('date')
-                    hw_subject = data.get('subject')
-                    if hw_date and hw_subject:
-                        from urllib.parse import quote
-                        hw_deep_link = (f"https://reschool.app/open?date={quote(hw_date)}"
-                                        f"&subject={quote(hw_subject)}")
+                hw_deep_link = notification_open_url(notification_type, data)
 
                 # доставка в личку, так было и раньше
                 if telegram_info.get('telegram_user_id'):
@@ -77,12 +101,16 @@ def send_notification_with_telegram(
                         notification_type=notification_type,
                         notification_data=data,
                         analysis_data=telegram_analysis,
+                        durable=True,
                     )
 
                 # в группу шлём только домашнее задание и оценки,
                 # сообщения туда намеренно не уходят
                 group_enabled = bool(telegram_info.get('telegram_group_enabled'))
                 group_chat_id = telegram_info.get('telegram_group_chat_id')
+                if group_enabled and not group_chat_id and notification_type in ('homework', 'grade'):
+                    delivery_log(log, 'enqueue_failed', reason='missing_group_chat', registration=registration_id[:8])
+                    telegram_result = False
                 if group_enabled and group_chat_id and notification_type in ('homework', 'grade'):
                     topic_map_raw = telegram_info.get('telegram_topic_map')
                     topic_map = {}
@@ -129,14 +157,19 @@ def send_notification_with_telegram(
                         message_thread_id=thread_id,
                         deep_link_url=hw_deep_link,
                         notification_type=notification_type,
-                        notification_data=data if notification_type == 'homework' else None,
+                        notification_data=data if notification_type == 'homework' else {
+                            'id': (data or {}).get('id'),
+                            'revision': hashlib.sha256(json.dumps(data or {}, sort_keys=True).encode()).hexdigest(),
+                        },
                         analysis_data=telegram_analysis if notification_type == 'homework' else None,
+                        durable=True,
                     )
-                    telegram_result = telegram_result or group_result
+                    telegram_result = telegram_result and group_result
             except Exception as e:
                 log(f"[CF3] Telegram send error: {type(e).__name__}")
+                telegram_result = False
 
-    return history_result or telegram_result
+    return history_result and telegram_result
 
 
 def send_telegram_relogin_notice(registration_id, username):
@@ -160,6 +193,7 @@ def send_telegram_relogin_notice(registration_id, username):
             telegram_info['telegram_user_id'],
             "🔐 Повторный вход выполнен",
             f"Аккаунт: {username}\nВремя: {now_str}",
+            durable=True,
         )
     except Exception as e:
         log(f"[CF3] Telegram relogin notice error: {e}")

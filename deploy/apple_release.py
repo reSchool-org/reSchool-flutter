@@ -438,7 +438,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("unsigned", "release", "cleanup"))
     parser.add_argument("--target", choices=TARGETS, default="ios-testflight")
-    parser.add_argument("--version", default="2.0.0")
+    parser.add_argument("--version", default="2.0.1")
     parser.add_argument("--build", default="1")
     parser.add_argument("--upload", action="store_true")
     args = parser.parse_args()

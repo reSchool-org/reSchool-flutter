@@ -12,7 +12,7 @@ import publish_apple_release as publisher
 
 
 COMMIT = "a" * 40
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 REPO = "example/reschool"
 TAG = "v" + VERSION
 MARKER = f"<!-- reschool-apple-release:{COMMIT} -->"
@@ -234,7 +234,7 @@ class PublicationTests(ArtifactFixture):
         self.staging_paths = []
         reads = {
             f"repos/{REPO}/releases/tags/{TAG}": None if release is None else json.dumps(release).encode(),
-            f"repos/{REPO}/git/ref/tags/{TAG}": None if tag_commit is None else b'{"ref":"refs/tags/v2.0.0"}',
+            f"repos/{REPO}/git/ref/tags/{TAG}": None if tag_commit is None else b'{"ref":"refs/tags/v2.0.1"}',
             # даже для аннотированных тегов идём через /commits, а не берём sha самого тега
             f"repos/{REPO}/commits/{TAG}": json.dumps({"sha": tag_commit}).encode(),
         }
@@ -374,7 +374,7 @@ class PublicationTests(ArtifactFixture):
     def test_invalid_cli_values_fail_before_github(self):
         for options in ({"repo": "--bad"}, {"repo": "owner/repo/extra"},
                         {"commit": "main"}, {"commit": "A" * 40},
-                        {"version": "1.0"}, {"version": "2.0.0;bad"}):
+                        {"version": "1.0"}, {"version": "2.0.1;bad"}):
             with self.subTest(options=options):
                 self.reject(".+", **options)
 

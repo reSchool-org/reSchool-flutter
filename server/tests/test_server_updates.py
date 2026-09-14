@@ -33,7 +33,7 @@ class UpdateTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         (self.root / '.env').write_bytes(b'API_TOKEN=secret\n')
-        (self.root / 'VERSION').write_text('2.0.0\n')
+        (self.root / 'VERSION').write_text('2.0.1\n')
         (self.root / 'Dockerfile').write_bytes(b'old image')
         self.manager = SettingsManager(self.root, self.root / 'socket', [])
         self.updater = self.manager.updater
@@ -126,7 +126,7 @@ class UpdateTests(unittest.TestCase):
         run, restart = self.apply(healthy=[False, True])
         self.assertEqual(self.manager.operation['status'], 'rolled_back')
         self.assertEqual((self.root / 'Dockerfile').read_bytes(), b'old image')
-        self.assertEqual(self.updater.current(), '2.0.0')
+        self.assertEqual(self.updater.current(), '2.0.1')
         self.assertFalse((self.root / 'server_advanced/__main__.py').exists())
         self.assertEqual(restart.call_count, 2)
         run.assert_any_call(['docker', 'image', 'tag', 'sha256:previous', 'reschool-server_advanced'])

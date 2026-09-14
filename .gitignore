@@ -159,9 +159,12 @@ previews/
 **/.git
 docs/
 /test/*
+server/tests/
 !/test/bell_time_test.dart
 !/test/bell_schedule_design_test.dart
 !/test/app_font_test.dart
+!/test/android_apk_update_test.dart
+!/test/deep_link_navigation_test.dart
 
 
 # генерится actions, в репозитории не хранится

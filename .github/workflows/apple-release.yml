@@ -9,7 +9,7 @@ on:
         options: [ios-testflight, macos-testflight, macos-direct, macos-all, all]
         required: true
       version:
-        description: 'Marketing version, for example 2.0.0'
+        description: 'Marketing version, for example 2.0.1'
         type: string
         required: true
       upload:

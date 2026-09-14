@@ -166,7 +166,9 @@ def initialize_server():
             log("Session expired.")
             cookies = None
 
-    if not cookies:
+    # входим заново только после явного изменения настроек
+    # перезапуск без действующей сессии не даёт разрешения на вход
+    if not cookies and changed_credentials:
         if ESCHOOL_USERNAME and ESCHOOL_PASSWORD:
             cookies = login(ESCHOOL_USERNAME, ESCHOOL_PASSWORD)
             if cookies:
@@ -181,7 +183,7 @@ def initialize_server():
     else:
         if changed_credentials:
             raise RuntimeError("Не удалось войти с новыми настройками eSchool")
-        log("Failed to authenticate server. Please check .env")
+        log("Server session unavailable; waiting for explicit login/settings change")
 
     domain = get_server_domain()
     if domain:
@@ -203,6 +205,8 @@ register_routes(app)
 
 def run_server():
     """запускаем сервер flask"""
+    from .runtime_logging import configure
+    configure()
     # сертификат нужен caddy, но генерируем и тут: без докера certgen никто не запускает
     try:
         ensure_certificate()

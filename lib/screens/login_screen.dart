@@ -200,6 +200,7 @@ class _LoginScreenState extends State<LoginScreen>
   void _navigateToHome() {
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
+        settings: const RouteSettings(name: '/home'),
         pageBuilder: (context, animation, secondaryAnimation) =>
             const HomeScreen(),
         transitionsBuilder: (context, animation, secondaryAnimation, child) {

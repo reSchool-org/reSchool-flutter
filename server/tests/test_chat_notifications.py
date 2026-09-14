@@ -74,7 +74,7 @@ def make_routes(chat, http):
         f'{PACKAGE}.eschool_api': {'get_eschool_version': Mock(return_value='3.0')},
         f'{PACKAGE}.telegram_bot': {name: Mock() for name in (
             'start_telegram_bot', 'stop_telegram_bot', 'restart_all_telegram_bots',
-            'send_telegram_message', 'request_topic_detect', 'get_and_clear_detected_topic',
+            'send_telegram_message', 'send_group_connected_notice', 'request_topic_detect', 'get_and_clear_detected_topic',
             'create_group_activation_code')},
         f'{PACKAGE}.encryption': {name: Mock() for name in (
             'init_encryption', 'encrypt_password', 'decrypt_password')},
@@ -132,6 +132,7 @@ class ChatPollingTests(_PollingFixture):
         self.assertEqual(self.events[0]['title'], '💬 Беседа класса: Моё имя')
         self.assertEqual(self.events[0]['data'], {
             'type': 'message', 'id': '1', 'messageId': '1011', 'senderId': '90',
+            'msgNum': 11, 'isGroup': True,
         })
         self.assertNotIn('Администратор', str(self.events))
 

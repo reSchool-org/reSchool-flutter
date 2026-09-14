@@ -128,6 +128,7 @@ class CustomHomeworkCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
             child: HomeworkAnalysisCard(
+              key: ValueKey('${homework.id}:${homework.updatedAt}:${homework.text}'),
               subject: homework.subject,
               date: homework.lessonDate,
               text: homework.text,

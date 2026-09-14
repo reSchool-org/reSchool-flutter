@@ -147,17 +147,11 @@ def get_messages(cookies):
         response = requests.get(url, headers=headers, cookies=cookies)
         log_response(response)
 
-        if response.status_code == 401:
-            log("Received 401, attempting re-login...")
-            new_cookies = login(ESCHOOL_USERNAME, ESCHOOL_PASSWORD)
-            if new_cookies:
-                server_state.cookies = new_cookies
-                log("Re-login successful, retrying request...")
-                response = requests.get(url, headers=headers, cookies=new_cookies)
-                log_response(response)
-            else:
-                log("Re-login failed.")
-                return []
+        if response.status_code in (401, 403):
+            server_state.cookies = None
+            server_state.prs_id = None
+            log("Server session expired; explicit login required")
+            return []
 
         if response.status_code == 200:
             threads = response.json()
@@ -194,17 +188,11 @@ def get_thread_messages(cookies, thread_id):
         response = requests.put(url, headers=headers, cookies=cookies, data=body)
         log_response(response)
 
-        if response.status_code == 401:
-            log("Received 401, attempting re-login...")
-            new_cookies = login(ESCHOOL_USERNAME, ESCHOOL_PASSWORD)
-            if new_cookies:
-                server_state.cookies = new_cookies
-                log("Re-login successful, retrying request...")
-                response = requests.put(url, headers=headers, cookies=new_cookies, data=body)
-                log_response(response)
-            else:
-                log("Re-login failed.")
-                return []
+        if response.status_code in (401, 403):
+            server_state.cookies = None
+            server_state.prs_id = None
+            log("Server session expired; explicit login required")
+            return []
 
         if response.status_code == 200:
             return response.json()

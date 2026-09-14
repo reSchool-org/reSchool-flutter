@@ -1,4 +1,4 @@
-"""держим сессию как веб клиент через events и digest; повторный вход выполняет монитор, здесь ждём update_session"""
+"""поддерживаем сессию как браузер, заново входим только по действию пользователя"""
 import json
 import threading
 import time
@@ -7,8 +7,7 @@ import requests
 from .config import BASE_URL, USER_AGENT
 from .database import get_db_connection, save_user_session, load_user_session, delete_user_session
 from .logging_utils import log
-from .eschool_api import server_state, login as server_login
-from .config import ESCHOOL_USERNAME, ESCHOOL_PASSWORD
+from .eschool_api import server_state
 
 
 # состояние keep alive
@@ -325,13 +324,10 @@ def _start_server_account_thread():
         return server_state.cookies
 
     def on_session_expired():
-        # серверный аккаунт можем перелогинить сразу
-        if ESCHOOL_USERNAME and ESCHOOL_PASSWORD:
-            cookies = server_login(ESCHOOL_USERNAME, ESCHOOL_PASSWORD)
-            if cookies:
-                server_state.cookies = cookies
-                log(f"[KeepAlive] Server re-logged in")
-        return False
+        server_state.cookies = None
+        server_state.prs_id = None
+        log("[KeepAlive] Server session expired; waiting for explicit login")
+        return True
 
     _start_account_threads("server", "server", get_cookies, on_session_expired)
 
@@ -339,19 +335,11 @@ def _start_server_account_thread():
 def _start_cf3_account_thread(reg_id, username):
     """поддерживаем сессию зарегистрированного аккаунта"""
 
-        # если в памяти пусто, поднимаем из базы
-    with _sessions_lock:
-        if reg_id not in _sessions:
-            persisted = load_user_session(reg_id)
-            if persisted:
-                _sessions[reg_id] = persisted
-                log(f"[KeepAlive] Loaded persisted session for {username}")
-            else:
-                _sessions[reg_id] = None
+    # монитор может запросить сессию раньше запуска её поддержки
+    get_session(reg_id)
 
     def get_cookies():
-        with _sessions_lock:
-            return _sessions.get(reg_id)
+        return get_session(reg_id)
 
     def on_session_expired():
         # помечаем сессию негодной и глушим аккаунт, пока пользователь не зарегистрируется заново
@@ -450,9 +438,14 @@ def stop_keep_alive():
 
 
 def get_session(account_id):
-    """просроченная или отсутствующая сессия возвращает None"""
+    """используем сохранённые куки, чтобы не входить заново при первом обращении"""
     with _sessions_lock:
-        return _sessions.get(account_id)
+        if account_id in _sessions:
+            return _sessions[account_id]
+    persisted = load_user_session(account_id)
+    with _sessions_lock:
+        # за время чтения базы сессию могли обновить или явно остановить
+        return _sessions.setdefault(account_id, persisted)
 
 
 def update_session(account_id, cookies):

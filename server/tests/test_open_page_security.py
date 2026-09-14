@@ -141,6 +141,37 @@ class OpenPageSecurityTests(unittest.TestCase):
         self.assertIsNone(page.refresh)
         self.assertIn('window.location.href = openLink.href;', html)
 
+    def test_homework_and_grade_keep_exact_lesson(self):
+        for kind, host in [('homework', 'diary'), ('grade', 'grade')]:
+            _, page = self.render(type=kind, date='2026-09-16', subject='Физика & химия', lessonId='42')
+            link = urlsplit(page.href)
+            self.assertEqual(link.netloc, host)
+            self.assertEqual(parse_qs(link.query), {
+                'date': ['2026-09-16'], 'subject': ['Физика & химия'], 'lessonId': ['42']})
+
+    def test_message_opens_exact_thread_and_cursor(self):
+        _, page = self.render(type='message', threadId='12', msgNum='34', isGroup='true')
+        self.assertEqual(urlsplit(page.href).netloc, 'message')
+        self.assertEqual(parse_qs(urlsplit(page.href).query), {
+            'threadId': ['12'], 'msgNum': ['34'], 'isGroup': ['true']})
+
+    def test_notification_links_round_trip_through_open_page(self):
+        links = load_module('notification_links', {})
+        examples = [
+            ('homework', {'date': '2026-09-16', 'subject': 'Физика & химия', 'lessonId': 42}, 'diary'),
+            ('grade', {'date': '2026-09-16', 'subject': 'Физика', 'lessonId': 42}, 'grade'),
+            ('message', {'id': '12', 'msgNum': 34, 'isGroup': True, 'messageId': '999'}, 'message'),
+        ]
+        for kind, data, host in examples:
+            url = links.notification_open_url(kind, data)
+            params = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+            _, page = self.render(**params)
+            self.assertEqual(urlsplit(page.href).netloc, host)
+            if kind == 'message':
+                self.assertEqual(parse_qs(urlsplit(page.href).query)['msgNum'], ['34'])
+            else:
+                self.assertEqual(parse_qs(urlsplit(page.href).query)['subject'], [data['subject']])
+
 
 if __name__ == '__main__':
     unittest.main()

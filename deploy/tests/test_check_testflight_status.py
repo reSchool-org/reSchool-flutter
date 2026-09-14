@@ -22,7 +22,7 @@ class TestFlightStatusTests(unittest.TestCase):
                 "buildBetaDetail": {"data": {"type": "buildBetaDetails", "id": "detail-1"}},
             },
         }
-        self.version = {"platform": "IOS", "version": "2.0.0"}
+        self.version = {"platform": "IOS", "version": "2.0.1"}
         self.detail = {"externalBuildState": "IN_BETA_TESTING"}
         self.included = {
             ("preReleaseVersions", "version-1"): {"attributes": self.version},
@@ -32,7 +32,7 @@ class TestFlightStatusTests(unittest.TestCase):
             "isInternalGroup": False, "publicLinkEnabled": True,
             "publicLink": status.DEFAULT_PUBLIC_URL,
         }}
-        self.release = {"id": 42, "tag_name": "v2.0.0", "draft": False,
+        self.release = {"id": 42, "tag_name": "v2.0.1", "draft": False,
                         "prerelease": False, "assets": []}
 
     def client(self):
@@ -44,13 +44,13 @@ class TestFlightStatusTests(unittest.TestCase):
         return client
 
     def test_only_external_testing_state_is_publishable(self):
-        self.assertTrue(status.externally_testing(self.build, self.included, "2.0.0", self.now))
+        self.assertTrue(status.externally_testing(self.build, self.included, "2.0.1", self.now))
         for state in ("READY_FOR_BETA_TESTING", "BETA_APPROVED", "IN_BETA_REVIEW",
                       "WAITING_FOR_BETA_REVIEW", "READY_FOR_BETA_SUBMISSION", "BETA_REJECTED",
                       "EXPIRED", "MISSING_EXPORT_COMPLIANCE", "PROCESSING", None):
             with self.subTest(state=state), patch.dict(self.detail, {
                     "externalBuildState": state, "internalBuildState": "IN_BETA_TESTING"}):
-                self.assertFalse(status.externally_testing(self.build, self.included, "2.0.0", self.now))
+                self.assertFalse(status.externally_testing(self.build, self.included, "2.0.1", self.now))
 
     def test_wrong_version_platform_expired_or_invalid_build_is_not_publishable(self):
         for resource, changes in [
@@ -63,24 +63,24 @@ class TestFlightStatusTests(unittest.TestCase):
             (self.build["attributes"], {"expirationDate": "2099-01-01"}),
         ]:
             with self.subTest(changes=changes), patch.dict(resource, changes):
-                self.assertFalse(status.externally_testing(self.build, self.included, "2.0.0", self.now))
-        self.assertFalse(status.externally_testing(self.build, {}, "2.0.0", self.now))
+                self.assertFalse(status.externally_testing(self.build, self.included, "2.0.1", self.now))
+        self.assertFalse(status.externally_testing(self.build, {}, "2.0.1", self.now))
 
     def test_public_link_must_belong_to_external_group_containing_build(self):
         client = self.client()
-        self.assertEqual(status.find_external_build(client, "2.0.0", status.DEFAULT_PUBLIC_URL), self.build)
+        self.assertEqual(status.find_external_build(client, "2.0.1", status.DEFAULT_PUBLIC_URL), self.build)
         query = client.listing.call_args.kwargs
         self.assertEqual(query["filter[builds]"], "build-1")
         self.assertEqual(query["filter[app]"], "app-1")
         for change in ({"isInternalGroup": True}, {"publicLinkEnabled": False},
                        {"publicLink": "https://testflight.apple.com/join/Other"}):
             with self.subTest(change=change), patch.dict(self.group["attributes"], change):
-                self.assertIsNone(status.find_external_build(self.client(), "2.0.0", status.DEFAULT_PUBLIC_URL))
+                self.assertIsNone(status.find_external_build(self.client(), "2.0.1", status.DEFAULT_PUBLIC_URL))
 
     def test_publishes_exact_app_txt_without_overwrite(self):
         def command(*args, **kwargs):
             if args[1:3] == ("release", "upload"):
-                self.assertEqual(args[3], "v2.0.0")
+                self.assertEqual(args[3], "v2.0.1")
                 path = Path(args[4])
                 self.assertEqual(path.name, "app.txt")
                 self.assertEqual(path.read_text(), status.DEFAULT_PUBLIC_URL + "\n")
@@ -121,7 +121,7 @@ class TestFlightStatusTests(unittest.TestCase):
 
     def test_rejects_unsupported_tag_or_link_before_apple_check(self):
         factory = Mock()
-        with patch.object(status, "command", return_value=json.dumps({**self.release, "tag_name": "v2.0.0-rc1"}).encode()):
+        with patch.object(status, "command", return_value=json.dumps({**self.release, "tag_name": "v2.0.1-rc1"}).encode()):
             with self.assertRaises(ValueError):
                 status.publish_if_ready("owner/repo", status.DEFAULT_PUBLIC_URL, factory)
         with self.assertRaises(ValueError):

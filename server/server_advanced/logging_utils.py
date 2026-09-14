@@ -1,8 +1,10 @@
 import json
 import re
+import sys
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .config import REQUEST_LOG_FULL_DEBUG
+from .runtime_logging import safe_text, write_log
 
 
 _SENSITIVE_KEYS = {
@@ -85,7 +87,10 @@ def serialise_log_body(body):
 
 def log(message):
     """сразу сбрасываем сообщение в журнал"""
+    message = safe_text(message)
     print(message, flush=True)
+    current = sys.exc_info()
+    write_log(message, current if current[0] else None)
 
 
 def log_request(method, url, headers, body=None):

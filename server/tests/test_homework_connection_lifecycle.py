@@ -198,6 +198,24 @@ class HomeworkConnectionTests(unittest.TestCase):
             'https://school.test', None, None)
         self.assertEqual(self.module.analysis.add_pending.call_args.args[4], text)
 
+    def test_queued_attachment_recovers_local_path_before_releasing_connection_and_sending(self):
+        stored = {'id': 1, 'fileName': 'photo.jpg', 'storagePath': '/uploads/photo.jpg'}
+        self.module.get_homework_files.return_value = [stored]
+        self.module._send_custom_homework_notifications(
+            42, '9А', 'Физика', '2026-09-16', 'Переписать таблицу', 'Автор',
+            [{'id': 1, 'fileName': 'photo.jpg'}], 'https://school.test', None, None)
+        self.assertTrue(self.module.get_homework_files.call_args.kwargs['include_storage_path'])
+        self.assertEqual(self.module.get_homework_files.call_args.args[1], 42)
+        self.assertEqual(self.module._notify_group_about_custom_homework.call_args.kwargs['files'], [stored])
+        self.assert_released()
+
+    def test_group_failure_is_propagated_even_when_classmate_history_succeeds(self):
+        self.module._notify_group_about_custom_homework = Mock(return_value=False)
+        self.assertFalse(self.module._send_custom_homework_notifications(
+            42, '9А', 'Физика', '2026-09-16', 'Текст', 'Автор', [],
+            'https://school.test', None, None))
+        self.module._notify_classmates.assert_called_once()
+
     def call(self, operation, **changes):
         body = {'subject': 'Алгебра', 'lesson_date': '2026-09-11',
                 'text': 'Решить номер 25', 'homework_id': '42', 'token': 'owner'}

@@ -207,10 +207,9 @@ class Card:
     def section(self, title):
         return self.add('### ' + md(label(title)), label(title))
 
-    def fact(self, name, value, *, marked=False):
+    def fact(self, name, value):
         value = label(value, 1000)
-        rich = ('==' + md(value) + '==') if marked else md(value)
-        return self.add(f'**{md(name)}** · {rich}', f'{name}: {value}')
+        return self.add(f'**{md(name)}** · {md(value)}', f'{name}: {value}')
 
     def table(self, headers, rows):
         rows = list(rows)
@@ -409,7 +408,7 @@ def notification(title, body, kind=None, data=None, analysis=None):
             card.text('Оценка времени недоступна. ' + str(analysis.get('unestimable_reason') or 'Недостаточно данных о задании.'))
     elif kind == 'grade':
         if data.get('value') is not None:
-            card.fact('Оценка', data['value'], marked=True)
+            card.fact('Оценка', data['value'])
         rows = []
         for line in clean(body).splitlines():
             key, separator, value = line.partition(': ')

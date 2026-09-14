@@ -30,12 +30,32 @@ class DeepLinkHandler {
       };
       if (tab == null) return;
       DiaryNavigationService.instance.switchTab(tab);
-      navigatorKey.currentState?.popUntil(
-        (route) => route.isFirst || route.settings.name == '/home',
+    } else if (uri.host == 'message' || uri.host == 'chat') {
+      final threadId = _positiveId(
+        uri.queryParameters['threadId'] ?? uri.queryParameters['id'],
       );
-    } else if (uri.host == 'diary') {
+      if (threadId == null) return;
+      DiaryNavigationService.instance.openChat(
+        ChatNavigationRequest(
+          threadId: threadId,
+          messageNumber: _positiveId(uri.queryParameters['msgNum']),
+          title: uri.queryParameters['title'] ?? 'Сообщения',
+          isGroup: uri.queryParameters['isGroup'] == 'true',
+        ),
+      );
+    } else if (uri.host == 'grade' &&
+        DateTime.tryParse(uri.queryParameters['date'] ?? '') == null) {
+      DiaryNavigationService.instance.switchTab(1);
+    } else if (uri.host == 'diary' ||
+        uri.host == 'homework' ||
+        uri.host == 'grade') {
       _handleDiaryLink(uri, navigatorKey);
     }
+  }
+
+  static int? _positiveId(String? value) {
+    final id = int.tryParse(value ?? '');
+    return id != null && id > 0 ? id : null;
   }
 
   static void _handleDiaryLink(
@@ -48,16 +68,13 @@ class DeepLinkHandler {
 
     // уводим на вкладку дневника и открываем нужную дату с предметом,
     // за pendingTab следит HomeScreen и переключается сам, а DiaryScreen забирает отложенный запрос
-    DiaryNavigationService.instance.switchTab(0, date: date, subject: subject);
-
-    // если пользователь сидит во вложенном экране (настройки, история уведомлений),
-    // выталкиваем его обратно, чтобы HomeScreen стал видимым
-    final nav = navigatorKey.currentState;
-    if (nav != null && nav.canPop()) {
-      nav.popUntil(
-        (route) => route.isFirst || (route.settings.name == '/home'),
-      );
-    }
+    DiaryNavigationService.instance.switchTab(
+      0,
+      date: date,
+      subject: subject,
+      lessonId: _positiveId(uri.queryParameters['lessonId']),
+    );
+    // главный экран выполнит переход после входа, здесь нельзя закрывать экран авторизации
   }
 
   static Future<void> _handleLinkDevice(

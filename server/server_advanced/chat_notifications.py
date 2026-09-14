@@ -256,6 +256,7 @@ def notification_event(thread, message, own_prs_id):
         'data': {
             'type': 'message', 'id': str(thread['id']),
             'messageId': str(message['msgId']), 'senderId': str(sender_id),
+            'msgNum': message.get('msgNum'), 'isGroup': thread.get('dlgType') == 2,
         },
     }
 

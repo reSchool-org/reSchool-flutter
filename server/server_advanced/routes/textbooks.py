@@ -177,9 +177,14 @@ def get_analysis():
                 "SELECT id FROM homework_analysis WHERE id = %s AND grade_class = %s",
                 (analysis_id, grade_class))
         elif subject and lesson_date and text:
-            cursor.execute(
-                "SELECT id FROM homework_analysis WHERE dedup_hash = %s",
-                (analysis.dedup_hash(grade_class, subject, lesson_date, text),))
+            cursor.execute("""
+                SELECT id FROM homework_analysis
+                WHERE grade_class = %s AND subject = %s AND lesson_date = %s
+                  AND reject_reason IS DISTINCT FROM 'edited'
+                  AND (raw_text = %s OR dedup_hash = %s)
+                ORDER BY (raw_text = %s) DESC, id DESC LIMIT 1
+            """, (grade_class, subject, lesson_date, text,
+                  analysis.dedup_hash(grade_class, subject, lesson_date, text), text))
         else:
             return jsonify({"error": "Provide analysisId or subject+date+text"}), 400
 
@@ -309,4 +314,3 @@ def get_analysis_attachment(analysis_id, index):
     finally:
         cursor.close()
         conn.close()
-

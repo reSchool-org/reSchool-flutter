@@ -547,7 +547,7 @@ class _ServerUpdates extends AdvancedCloudService {
     bool public = false,
     bool get = false,
   }) async => {
-    'currentVersion': '2.0.0',
+    'currentVersion': '2.0.1',
     'checkedAt': 123,
     'supported': true,
     'updateAvailable': false,

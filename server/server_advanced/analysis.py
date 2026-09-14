@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timedelta
 
 from . import ai_prompts, analysis_sources, gemini_client, textbook
@@ -34,11 +35,15 @@ def dedup_hash(grade_class, subject, lesson_date, text):
 
 
 def enqueue(conn, grade_class, subject, lesson_date, text, source, source_id,
-            attachments=None, attachment_headers=None, attachment_cookies=None):
+            attachments=None, attachment_headers=None, attachment_cookies=None,
+            force_new=False):
     """разбор общий для класса, иначе одно задание считалось бы для каждого ученика"""
     if not text or not str(text).strip():
         return None, False
     digest = dedup_hash(grade_class, subject, lesson_date, text)
+    if force_new and source == 'custom':
+        # правка вложений, пунктуации и возврат к прежнему тексту тоже создают новую редакцию
+        digest = hashlib.sha256(f'{digest}:{source_id}:{uuid.uuid4().hex}'.encode()).hexdigest()
     cursor = conn.cursor()
     try:
         cursor.execute("""
@@ -132,9 +137,12 @@ def run(analysis_id):
             return
 
         cursor.execute(
-            "UPDATE homework_analysis SET status = 'processing', attempts = attempts + 1 WHERE id = %s",
+            "UPDATE homework_analysis SET status = 'processing', attempts = attempts + 1 "
+            "WHERE id = %s AND status NOT IN ('done', 'rejected')",
             (analysis_id,))
         conn.commit()
+        if not cursor.rowcount:
+            return
 
         # своё домашнее задание сначала проходит модерацию, бред и дубли до класса не доводим
         if source == "custom":
@@ -151,7 +159,7 @@ def run(analysis_id):
                 total_minutes = %s, range_min = %s, range_max = %s, hardest = %s, why = %s,
                 textbook_id = %s, estimable = %s, unestimable_reason = %s, sources = %s,
                 last_error = NULL
-            WHERE id = %s
+            WHERE id = %s AND status = 'processing'
         """, (json_value(result["targets"]), json_value(result["items"]),
               result.get("total_minutes"), result.get("range_min"), result.get("range_max"),
               (result.get("hardest") or "")[:128], result.get("why"),
@@ -159,12 +167,15 @@ def run(analysis_id):
               result.get("unestimable_reason"), json_value(result.get("sources") or []),
               analysis_id))
         conn.commit()
+        if not cursor.rowcount:
+            return  # пока модель работала, автор изменил или удалил задание
         flush(analysis_id)
         _request_merge(conn, grade_class, subject, lesson_date)
     except Exception as e:
         log(f"[Analysis] {analysis_id} упал: {e}")
         cursor.execute(
-            "UPDATE homework_analysis SET status = 'pending', last_error = %s WHERE id = %s",
+            "UPDATE homework_analysis SET status = 'pending', last_error = %s "
+            "WHERE id = %s AND status <> 'rejected'",
             (str(e)[:500], analysis_id))
         conn.commit()
         cursor.execute("SELECT attempts FROM homework_analysis WHERE id = %s", (analysis_id,))
@@ -172,7 +183,7 @@ def run(analysis_id):
         if row and row[0] >= MAX_ATTEMPTS:
             # дальше пытаться бессмысленно, пусть уходит обычный пуш
             cursor.execute(
-                "UPDATE homework_analysis SET status = 'failed' WHERE id = %s", (analysis_id,))
+                "UPDATE homework_analysis SET status = 'failed' WHERE id = %s AND status <> 'rejected'", (analysis_id,))
             conn.commit()
             flush(analysis_id)
         raise
@@ -193,7 +204,7 @@ def _request_merge(conn, grade_class, subject, lesson_date):
 def _reject(conn, cursor, analysis_id, verdict):
     cursor.execute("""
         UPDATE homework_analysis SET status = 'rejected', reject_reason = %s,
-            reject_detail = %s, duplicate_of = %s WHERE id = %s
+            reject_detail = %s, duplicate_of = %s WHERE id = %s AND status <> 'rejected'
     """, (verdict["verdict"][:16], verdict.get("reason", "")[:500],
           verdict.get("duplicate_of"), analysis_id))
     cursor.execute(
@@ -596,18 +607,27 @@ def flush(analysis_id):
         return
     cursor = conn.cursor()
     try:
+        analysis = load(analysis_id, cursor)
+        if analysis and analysis.get('status') == 'rejected':
+            cursor.execute("""
+                UPDATE pending_notifications SET status = 'dropped'
+                WHERE analysis_id = %s AND status IN ('pending', 'failed')
+            """, (analysis_id,))
+            conn.commit()
+            return
         cursor.execute("""
             UPDATE pending_notifications
-            SET status = 'sent', sent_at = (now() AT TIME ZONE 'utc')
+            SET status = 'sending', attempted_at = (now() AT TIME ZONE 'utc'), last_error = NULL,
+                delivery_attempts = delivery_attempts + 1
             WHERE analysis_id = %s AND status = 'pending'
+              AND (COALESCE(payload->>'event_type', 'created') <> 'updated' OR %s = 'done')
             RETURNING id, audience, registration_id, grade_class, title, body, data, payload,
                    exclude_classmate_id, exclude_registration_id
-        """, (analysis_id,))
+        """, (analysis_id, (analysis or {}).get('status', 'pending')))
         rows = sorted(cursor.fetchall(), key=lambda row: row[0])
         if not rows:
             return
 
-        analysis = load(analysis_id, cursor)
         extra = summary_lines(analysis)
         attachments = analysis_images(cursor, analysis_id) if analysis else []
 
@@ -616,6 +636,7 @@ def flush(analysis_id):
         cursor.close()
         conn.close()
 
+    delivered, failed = 0, 0
     for row in rows:
         (_id, audience, registration_id, grade_class, title, body, data, payload,
          exclude_classmate, exclude_registration) = row
@@ -623,9 +644,11 @@ def flush(analysis_id):
         if analysis:
             data = {**data, "analysisId": str(analysis_id)}
         full_body = "\n".join([part for part in [body] + extra if part])
+        result, error_type = None, None
+        log(f"[Analysis] Delivery started: pending_id={_id}, analysis_id={analysis_id}, audience={audience}")
         try:
             if audience == "registration":
-                send_notification_with_telegram(
+                result = send_notification_with_telegram(
                     title, full_body, data,
                     registration_id=registration_id,
                     notification_type=(payload or {}).get("notification_type", "homework"),
@@ -637,7 +660,7 @@ def flush(analysis_id):
             elif audience == "class" and (payload or {}).get("custom_homework_id"):
                 # своё домашнее задание идёт ещё и в группу телеграма, там свой формат карточки
                 from .routes.homework import _send_custom_homework_notifications
-                _send_custom_homework_notifications(
+                result = _send_custom_homework_notifications(
                     homework_id=payload["custom_homework_id"],
                     grade_class=grade_class,
                     subject=(analysis or {}).get("subject"),
@@ -652,14 +675,42 @@ def flush(analysis_id):
                     analysis_id=analysis_id,
                     attachments=attachments,
                     analysis_data=analysis,
+                    event_type=payload.get('event_type', 'created'),
                 )
             elif audience == "class":
-                _notify_classmates(grade_class, title, full_body, data,
+                result = _notify_classmates(grade_class, title, full_body, data,
                                    exclude_classmate_id=exclude_classmate,
                                    exclude_registration_id=exclude_registration)
+            else:
+                result, error_type = False, 'unsupported_audience'
         except Exception as e:
-            log(f"[Analysis] Отправка отложенного пуша {_id} не удалась: {e}")
-    log(f"[Analysis] {analysis_id}: отправлено отложенных пушей {len(rows)}")
+            result, error_type = False, type(e).__name__
+        ok = result is not False
+        outcome = 'sent' if ok else 'failed'
+        # повтор всего пакета после частичной доставки дублирует карточку и историю
+        # ошибку и номера сообщений можно найти в журнале
+        error = None if ok else (error_type or 'delivery_failed_or_partial; see TelegramDelivery logs')
+        status_conn = get_db_connection()
+        if status_conn:
+            try:
+                status_cursor = status_conn.cursor()
+                status_cursor.execute("""
+                    UPDATE pending_notifications SET status = %s,
+                        sent_at = CASE WHEN %s THEN (now() AT TIME ZONE 'utc') ELSE NULL END,
+                        last_error = %s WHERE id = %s AND status = 'sending'
+                """, (outcome, ok, error, _id))
+                status_conn.commit()
+                status_cursor.close()
+            except Exception as status_error:
+                log(f"[Analysis] Delivery status save failed: pending_id={_id}, outcome={outcome}, error={type(status_error).__name__}")
+            finally:
+                status_conn.close()
+        else:
+            log(f"[Analysis] Delivery status unavailable: pending_id={_id}, outcome={outcome}")
+        delivered += int(ok)
+        failed += int(not ok)
+        log(f"[Analysis] Delivery finished: pending_id={_id}, analysis_id={analysis_id}, status={outcome}, error={error}")
+    log(f"[Analysis] {analysis_id}: delivery dispatched={delivered}, failed={failed}; Telegram status is in telegram_outbox")
 
 
 def flush_stale():
@@ -669,6 +720,26 @@ def flush_stale():
         return
     cursor = conn.cursor()
     try:
+        # здесь остались только операции с базой, их можно повторять
+        # история и очередь отсекают уже принятые события
+        cursor.execute("""
+            UPDATE pending_notifications SET status = 'pending'
+            WHERE delivery_attempts BETWEEN 1 AND 7 AND (
+                (status = 'failed' AND attempted_at < (now() AT TIME ZONE 'utc') - INTERVAL '2 minutes')
+                OR (status = 'sending' AND attempted_at < (now() AT TIME ZONE 'utc') - INTERVAL '30 minutes'))
+            RETURNING id
+        """)
+        for (retry_id,) in cursor.fetchall():
+            log(f"[Analysis] Retrying outbox dispatch: pending_id={retry_id}")
+        cursor.execute("""
+            UPDATE pending_notifications SET status = 'failed',
+                last_error = 'delivery_outcome_unknown; inspect logs before retry'
+            WHERE status = 'sending' AND attempted_at < (now() AT TIME ZONE 'utc') - INTERVAL '30 minutes'
+            RETURNING id, analysis_id
+        """)
+        for pending_id, stalled_analysis_id in cursor.fetchall():
+            log(f"[Analysis] Delivery outcome unknown: pending_id={pending_id}, analysis_id={stalled_analysis_id}")
+        conn.commit()
         deadline = datetime.utcnow() - timedelta(seconds=ANALYSIS_NOTIFICATION_TIMEOUT_SECONDS)
         cursor.execute("""
             SELECT DISTINCT analysis_id FROM pending_notifications

@@ -27,6 +27,16 @@ class CloudRolesTests(unittest.TestCase):
         from server_advanced.app import app
         from server_advanced import database, encryption
         cls.app, cls.db, cls.encryption = app, database, encryption
+        # проверяем подключение самого пула, потому что приложение может
+        # переопределить параметры из строки подключения
+        probe = database.get_db_connection()
+        try:
+            actual_database = probe.execute('SELECT current_database()').fetchone()[0]
+            if actual_database != 'reschool_test' and not actual_database.startswith('reschool_test_'):
+                raise RuntimeError('Cloud role tests require an isolated reschool_test database')
+            cls.test_database = actual_database
+        finally:
+            probe.close()
         database.init_db()
         encryption.init_encryption()
         cls.app.config['TESTING'] = True
@@ -38,6 +48,9 @@ class CloudRolesTests(unittest.TestCase):
 
     def setUp(self):
         self.conn = self.db.get_db_connection()
+        if self.conn.execute('SELECT current_database()').fetchone()[0] != self.test_database:
+            self.conn.close()
+            raise RuntimeError('Test connection changed; refusing to truncate tables')
         self.conn.execute('TRUNCATE custom_homework, cloud_invites, cf3_registrations, classmate_registrations, verified_users, cloud_server_bot CASCADE')
         self.conn.commit()
         self.client = self.app.test_client()
@@ -242,6 +255,33 @@ class CloudRolesTests(unittest.TestCase):
             self.assertEqual(result.status_code, 200, result.json)
             self.assertEqual(start.call_args.args[0], first['registrationId'])
         self.assertEqual(self.admin_request('/cloud/status', first).json['telegramUserId'], '66')
+
+    def test_group_confirmation_is_atomic_private_and_not_repeated_for_topics(self):
+        import json
+        first, second = self.admin_device(), self.admin_device()
+        self.conn.execute("""UPDATE cf3_registrations SET telegram_bot_token='123:TEST',
+            telegram_user_id='55' WHERE id=%s""", (first['registrationId'],))
+        self.conn.commit()
+        def update(device=second, **kwargs):
+            return self.admin_request('/update-telegram-group', device,
+                **dict(telegramGroupEnabled=True, telegramGroupChatId='-100', telegramGroupTitle='Класс', **kwargs))
+        with patch('server_advanced.routes.notifications.send_group_connected_notice', return_value=False):
+            self.assertEqual(update().status_code, 503)
+        self.assertFalse(self.conn.execute('SELECT telegram_group_enabled FROM cf3_registrations WHERE id=%s',
+                                          (first['registrationId'],)).fetchone()[0])
+        self.conn.commit()
+        self.assertEqual(update().status_code, 200)
+        self.assertEqual(update(first, telegramTopicMap={'1': 7}).status_code, 200)
+        rows = self.conn.execute("SELECT payload_encrypted FROM telegram_outbox WHERE notification_type='group_connected'").fetchall()
+        self.assertEqual(len(rows), 1)
+        payload = json.loads(self.encryption.decrypt_password(rows[0][0]))
+        self.assertEqual(payload['user_id'], '55')
+        self.assertEqual(payload['notification_data']['id'], first['registrationId'])
+        self.conn.commit()
+        self.assertEqual(self.admin_request('/update-telegram-group', second,
+            telegramGroupEnabled=False, telegramGroupChatId='-100').status_code, 200)
+        self.assertEqual(update().status_code, 200)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM telegram_outbox WHERE notification_type='group_connected'").fetchone()[0], 2)
 
     def test_monitoring_status_matches_telegram_across_devices(self):
         first, second = self.admin_device(), self.admin_device()

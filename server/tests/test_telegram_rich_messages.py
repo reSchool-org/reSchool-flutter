@@ -1,12 +1,14 @@
 import ast
 import io
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import types
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from test_backend_hardening import PACKAGE, SERVER, load_module
 
@@ -20,6 +22,7 @@ delivery = load_module('telegram_delivery', {
     'telebot': {'apihelper': apihelper},
     'telebot.types': {'InputRichMessage': telegram_types.InputRichMessage},
     f'{PACKAGE}.telegram_formatting': vars(formatting),
+    f'{PACKAGE}.logging_utils': {'log': Mock()},
 })
 
 
@@ -42,8 +45,36 @@ def bot_module(bot, http_get=None):
         f'{PACKAGE}.database': {'get_db_connection': Mock(), 'load_user_session': Mock(return_value=None)},
         f'{PACKAGE}.chat_notifications': {'fetch_threads': Mock(), 'ChatSessionExpired': type('ChatSessionExpired', (Exception,), {})},
         f'{PACKAGE}.notification_delivery': {},
-        f'{PACKAGE}.encryption': {'decrypt_password': Mock(), 'init_encryption': Mock()},
+        f'{PACKAGE}.encryption': {'decrypt_password': Mock(), 'encrypt_password': Mock(), 'init_encryption': Mock()},
     })
+
+
+class DeliveryDiagnosticsTests(unittest.TestCase):
+    def test_file_log_survives_new_handler_and_rotates(self):
+        module = load_module('telegram_diagnostics', {})
+        output = Mock()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, RESCHOOL_RUNTIME_DIR=directory):
+            module.delivery_log(output, 'notification_started', homework_id=4)
+            path = Path(directory) / 'logs/telegram-delivery.jsonl'
+            self.assertEqual(json.loads(path.read_text())['homework_id'], 4)
+            module._handler.close()
+            module._handler = None
+            module.delivery_log(output, 'notification_delivered', message_ids=[17])
+            self.assertEqual(len(path.read_text().splitlines()), 2)
+            module._handler.maxBytes = 1
+            module.delivery_log(output, 'next_notification')
+            self.assertTrue(Path(str(path) + '.1').exists())
+            module._handler.close()
+
+    def test_disk_failure_does_not_break_delivery(self):
+        module = load_module('telegram_diagnostics', {})
+        output = Mock()
+        with patch.dict(os.environ, RESCHOOL_RUNTIME_DIR='/test-runtime'), \
+                patch.object(module.os, 'makedirs', side_effect=OSError('sensitive path')):
+            module.delivery_log(output, 'notification_delivered', message_ids=[17])
+        self.assertIn('notification_delivered', output.call_args_list[0].args[0])
+        self.assertIn('File log unavailable: OSError', output.call_args_list[1].args[0])
+        self.assertNotIn('sensitive path', str(output.call_args_list))
 
 
 class FormattingTests(unittest.TestCase):
@@ -376,6 +407,40 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotIn('evil.test', str(self.calls))
         self.assertNotIn('secret', str(self.calls))
 
+    def test_api_failure_logs_code_description_and_context_without_credentials(self):
+        module = bot_module(self.bot)
+        apihelper._make_request.side_effect = rejection(
+            403, 'Forbidden: bot was kicked; https://example.test/file?token=secret 123:TEST')
+        self.assertFalse(module.send_telegram_message('123:TEST', '-100', 'ДЗ', 'private-homework',
+            notification_type='homework', notification_data={'id': 4, 'analysisId': 24},
+            message_thread_id=7))
+        events = [json.loads(c.args[0].split(' ', 1)[1]) for c in module.log.call_args_list]
+        error = next(e for e in events if e['event'] == 'notification_failed')
+        self.assertEqual(error['error_code'], 403)
+        self.assertIn('bot was kicked', error['description'])
+        self.assertEqual((error['chat_id'], error['topic_id'], error['homework_id'], error['analysis_id']),
+                         ('-100', 7, 4, 24))
+        self.assertTrue(error['delivery_id'])
+        for secret in ('123:TEST', 'token=secret', 'private-homework'):
+            self.assertNotIn(secret, str(events))
+
+    def test_unavailable_url_falls_back_to_text_and_reports_partial_delivery(self):
+        module = bot_module(self.bot)
+        original = self.record
+        def failed_media(token, method_name, **kwargs):
+            if method_name in ('sendRichMessage', 'sendPhoto'):
+                raise rejection(400, 'Bad Request: failed to get HTTP URL content')
+            return original(token, method_name, **kwargs)
+        apihelper._make_request.side_effect = failed_media
+        self.assertFalse(module.send_telegram_message('123:TEST', '-100', 'ДЗ', 'Текст',
+            attachments=[{'url': 'https://school.test/private.jpg', 'isImage': True}], message_thread_id=7,
+            require_complete=True))
+        self.assertEqual([c['method'] for c in self.calls], ['sendMessage'])
+        events = [json.loads(c.args[0].split(' ', 1)[1]) for c in module.log.call_args_list]
+        partial = next(e for e in events if e['event'] == 'notification_partial')
+        self.assertEqual(partial['message_ids'], [17])
+        self.assertEqual(partial['failed_attachments'], 1)
+
     def test_media_failure_does_not_repeat_text_on_network_timeout(self):
         module = bot_module(self.bot)
         apihelper._make_request.side_effect = requests.ReadTimeout('private-token')
@@ -409,6 +474,81 @@ class DeliveryTests(unittest.TestCase):
         with_media = [c for c in self.calls if 'media' in c.get('rich', {})]
         self.assertEqual(len(with_media), 1)
         self.assertIn('tg://photo?id=media0', with_media[0]['rich']['markdown'])
+
+    def test_serialized_service_buttons_survive_outbox_delivery(self):
+        module = bot_module(self.bot)
+        self.assertTrue(module.send_telegram_message('123:TEST', '55', 'Войти снова', 'Сессия истекла',
+            reply_markup_data={'inline_keyboard': [[{'text': 'Войти', 'callback_data': 'session_login:owner'}]]}))
+        markup = json.loads(self.calls[0]['params']['reply_markup'])
+        self.assertEqual(markup['inline_keyboard'][0][0]['callback_data'], 'session_login:owner')
+
+    def test_resume_after_later_page_connect_timeout_does_not_repeat_confirmed_page(self):
+        progress = {}
+        card = formatting.Card('ДЗ').text('Строка задания\n' * 6000)
+        self.assertGreater(len(card.pages()), 1)
+        original = self.record
+        attempts = []
+        def interrupt_second(token, method_name, **kwargs):
+            attempts.append(method_name)
+            if len(attempts) == 2:
+                raise requests.ConnectTimeout()
+            return original(token, method_name, **kwargs)
+        apihelper._make_request.side_effect = interrupt_second
+        with self.assertRaises(requests.ConnectTimeout):
+            delivery.send_card(self.bot, 55, card, progress=progress, checkpoint=lambda value: None)
+        self.assertTrue(progress['pages']['0']['done'])
+        first = self.calls[0]['rich']['markdown']
+        apihelper._make_request.side_effect = self.record
+        delivery.send_card(self.bot, 55, card, progress=progress, checkpoint=lambda value: None)
+        self.assertEqual(sum(c.get('rich', {}).get('markdown') == first for c in self.calls), 1)
+        self.assertEqual(len(self.calls), len(card.pages()))
+
+    def test_resume_plain_fallback_starts_at_unconfirmed_part(self):
+        progress = {}
+        card = formatting.Card('ДЗ').text('Строка ' * 1800)
+        original = self.record
+        plain_calls = []
+        def interrupt_plain(token, method_name, **kwargs):
+            if method_name == 'sendRichMessage':
+                raise rejection()
+            plain_calls.append(kwargs['params']['text'])
+            if len(plain_calls) == 2:
+                raise requests.ConnectTimeout()
+            return original(token, method_name, **kwargs)
+        apihelper._make_request.side_effect = interrupt_plain
+        with self.assertRaises(requests.ConnectTimeout):
+            delivery.send_card(self.bot, 55, card, progress=progress)
+        self.assertEqual(progress['pages']['0']['next_part'], 1)
+        apihelper._make_request.side_effect = self.record
+        delivery.send_card(self.bot, 55, card, progress=progress)
+        self.assertEqual(sum(c['params'].get('text') == plain_calls[0] for c in self.calls), 1)
+
+    def test_attachment_retry_keeps_delivered_text_and_first_attachment(self):
+        module = bot_module(self.bot)
+        progress = {}
+        original = self.record
+        uploads = []
+        def fail_second_attachment(token, method_name, **kwargs):
+            if method_name == 'sendRichMessage':
+                raise rejection()
+            if method_name == 'sendPhoto':
+                uploads.append(method_name)
+                if len(uploads) == 2:
+                    raise requests.ConnectTimeout()
+            return original(token, method_name, **kwargs)
+        apihelper._make_request.side_effect = fail_second_attachment
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / f'{i}.jpg' for i in range(2)]
+            for path in paths:
+                path.write_bytes(b'photo')
+            args = dict(attachments=[{'path': str(path), 'isImage': True} for path in paths],
+                        progress=progress, checkpoint=lambda value: None, raise_errors=True)
+            with self.assertRaises(requests.ConnectTimeout):
+                module.send_telegram_message('123:TEST', '55', 'ДЗ', 'Текст', **args)
+            self.assertEqual(progress['attachments_done'], [0])
+            apihelper._make_request.side_effect = self.record
+            self.assertTrue(module.send_telegram_message('123:TEST', '55', 'ДЗ', 'Текст', **args))
+        self.assertEqual([c['method'] for c in self.calls], ['sendMessage', 'sendPhoto', 'sendPhoto'])
 
     def test_long_homework_navigation_sends_one_page_with_working_page_controls(self):
         module = bot_module(self.bot)
@@ -457,16 +597,35 @@ class DeliveryTests(unittest.TestCase):
 
     def test_unavailable_conversations_are_reported_as_error_instead_of_empty_list(self):
         module = bot_module(self.bot)
-        module._get_user_data_for_telegram = Mock(return_value=([], [], None, 'Имя', None))
+        module._get_user_session = Mock(return_value=('account', {'session': 'test'}, {}, None))
+        module.fetch_threads.side_effect = RuntimeError('unavailable')
         messages, error = module._get_messages_for_telegram('registration')
         self.assertIsNone(messages)
         self.assertIn('Не удалось загрузить список бесед', error)
-        module._get_user_data_for_telegram.return_value = ([], [], [], 'Имя', None)
+        module.fetch_threads.side_effect = None
+        module.fetch_threads.return_value = []
         self.assertEqual(module._get_messages_for_telegram('registration'), ([], None))
+
+    def test_period_grades_use_session_and_registration_in_api_order(self):
+        import sys
+        module = bot_module(self.bot)
+        cookies = {'JSESSIONID': 'session-fixture'}
+        module._get_user_session = Mock(return_value=('account', cookies, {}, None))
+        grades = [{'subject': 'Математика', 'marks': ['5']}]
+        fetch_grades = Mock(return_value=(grades, 'Четверть', None, None))
+        fetch_periods = Mock(return_value=([{'id': 3, 'isCurrent': True}], None, None))
+        with patch.dict(sys.modules, {
+            f'{PACKAGE}.routes.notifications': types.SimpleNamespace(
+                get_grades_for_period=fetch_grades, get_periods_for_user=fetch_periods),
+        }):
+            self.assertEqual(module._get_grades_for_period_telegram('member', 3),
+                             (grades, 'Четверть', None))
+        fetch_grades.assert_called_once_with(cookies, 3, 'member')
+        fetch_periods.assert_not_called()
 
     def test_conversations_use_existing_session_without_relogin_or_diary_requests(self):
         module = bot_module(self.bot)
-        module.load_user_session.return_value = {'session': 'test'}
+        module._get_user_session = Mock(return_value=('account', {'session': 'test'}, {}, None))
         expected = [{'subject': 'Класс', 'preview': 'Добрый день'}]
         module.fetch_threads.return_value = expected
         module._get_user_data_for_telegram = Mock(side_effect=AssertionError('Unexpected login'))
@@ -515,6 +674,144 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(any(c.func.attr in ('send_message', 'reply_to', 'edit_message_text') for c in calls))
 
 
+    def test_group_connection_confirmation_uses_private_chat_and_persistent_queue(self):
+        import sys
+        module = bot_module(self.bot)
+        info = Mock(return_value={'telegram_bot_token': '123:TEST', 'telegram_user_id': '55',
+                                  'telegram_group_chat_id': '-100', 'telegram_enabled': False})
+        enqueue = Mock(return_value=True)
+        connection = Mock()
+        with patch.dict(sys.modules, {
+            f'{PACKAGE}.notification_delivery': types.SimpleNamespace(get_telegram_info=info),
+            f'{PACKAGE}.telegram_outbox': types.SimpleNamespace(enqueue_telegram_message=enqueue),
+        }):
+            self.assertTrue(module.send_group_connected_notice('primary', '-100', 'Класс', connection=connection))
+        self.assertEqual(enqueue.call_args.args[:2], ('123:TEST', '55'))
+        self.assertIn('Класс', enqueue.call_args.args[2])
+        self.assertEqual(enqueue.call_args.kwargs['notification_type'], 'group_connected')
+        self.assertIs(enqueue.call_args.kwargs['connection'], connection)
+        self.assertNotIn('message_thread_id', enqueue.call_args.kwargs)
+
+    def member_bot(self, rows=None):
+        module = bot_module(self.bot)
+        module.get_db_connection.return_value.cursor.return_value.fetchall.return_value = (
+            [{'id': 'member', 'token_encrypted': 'cipher'}] if rows is None else rows)
+        module.decrypt_password.return_value = '123:TEST'
+        return module
+
+    def personal_message(self, text='/grades', user=90, chat_type='private'):
+        return types.SimpleNamespace(chat=types.SimpleNamespace(id=user, type=chat_type),
+            from_user=types.SimpleNamespace(id=user), text=text, message_id=19, message_thread_id=None)
+
+    def command_handler(self, command):
+        return next(h['function'] for h in self.bot.message_handlers
+                    if command in h['filters'].get('commands', []))
+
+    def callback_handler(self, call):
+        return next(h['function'] for h in self.bot.callback_query_handlers if h['filters']['func'](call))
+
+    def test_member_commands_use_own_registration_and_preserve_arguments(self):
+        module = self.member_bot()
+        targets = {}
+        for action in ('grades', 'homework', 'status', 'start', 'retry', 'changepassword', 'cancel'):
+            targets[action] = Mock()
+            setattr(module, f'_handle_{action}_command', targets[action])
+        module._bot_polling_loop('owner', '123:TEST', '55')
+        for command, action in [('grades', 'grades'), ('dz', 'homework'), ('status', 'status'),
+                                ('start', 'start'), ('retry', 'retry'), ('passwd', 'changepassword'), ('cancel', 'cancel')]:
+            message = self.personal_message('/' + command + '@shared_bot 16.09')
+            self.command_handler(command)(message)
+            targets[action].assert_called_once_with(message, 'member')
+        query, params = module.get_db_connection.return_value.cursor.return_value.execute.call_args.args
+        self.assertIn('JOIN classmate_registrations', query)
+        self.assertIn("r.cloud_role = 'user'", query)
+        self.assertEqual(params, ('90',))
+
+    def test_binding_rejects_missing_ambiguous_wrong_bot_and_nonprivate_sender(self):
+        module = self.member_bot()
+        message = self.personal_message()
+        self.assertEqual(module._resolve_bot_registration(message, 'owner', '55', '123:TEST'), 'member')
+        self.assertIsNone(module._resolve_bot_registration(message, 'owner', '55', 'other-bot'))
+        cursor = module.get_db_connection.return_value.cursor.return_value
+        for rows in ([], [{'id': 'a'}, {'id': 'b'}]):
+            cursor.fetchall.return_value = rows
+            self.assertIsNone(module._resolve_bot_registration(message, 'owner', '55', '123:TEST'))
+        module.get_db_connection.reset_mock()
+        message.chat.type = 'supergroup'
+        self.assertIsNone(module._resolve_bot_registration(message, 'owner', '55', '123:TEST'))
+        message.chat.type = 'private'
+        message.from_user.id = 55
+        self.assertIsNone(module._resolve_bot_registration(message, 'owner', '55', '123:TEST'))
+        module.get_db_connection.assert_not_called()
+
+    def test_member_menu_and_navigation_load_member_data(self):
+        module = self.member_bot()
+        module._handle_grades_command = Mock()
+        module._get_messages_for_telegram = Mock(return_value=([], None))
+        module._get_user_data_for_telegram = Mock(return_value=([], [], [], None, None))
+        module._handle_period_command = Mock()
+        module._bot_polling_loop('owner', '123:TEST', '55')
+        call = types.SimpleNamespace(id='cb', message=self.personal_message(), from_user=types.SimpleNamespace(id=90))
+        for data in ('menu:grades', 'messages_page:0', 'hw_date:2026-09-14', 'period:3'):
+            call.data = data
+            self.callback_handler(call)(call)
+        self.assertEqual(module._handle_grades_command.call_args.args[1], 'member')
+        module._get_messages_for_telegram.assert_called_once_with('member')
+        module._get_user_data_for_telegram.assert_called_once_with('member')
+        self.assertEqual(module._handle_period_command.call_args.args[1], 'member')
+
+    def test_member_session_buttons_cannot_target_owner(self):
+        module = self.member_bot()
+        module._handle_session_stop_action = Mock()
+        module._handle_session_login_action = Mock()
+        module._perform_retry_session = Mock()
+        module._bot_polling_loop('owner', '123:TEST', '55')
+        call = types.SimpleNamespace(id='cb', message=self.personal_message(), from_user=types.SimpleNamespace(id=90))
+        for action, target in [('session_stop', module._handle_session_stop_action),
+                               ('session_login', module._handle_session_login_action),
+                               ('session_retry', module._perform_retry_session)]:
+            call.data = action + ':owner'
+            self.callback_handler(call)(call)
+            target.assert_not_called()
+            call.data = action + ':member'
+            self.callback_handler(call)(call)
+            self.assertEqual(target.call_args.args[-1], 'member')
+            self.assertEqual(target.call_count, 1)
+
+    def test_member_cannot_generate_group_code_and_owner_still_can(self):
+        module = self.member_bot()
+        module._handle_gen_command = Mock()
+        module._handle_list_subjects_command = Mock()
+        module._bot_polling_loop('owner', '123:TEST', '55')
+        for command, target in [('gen', module._handle_gen_command), ('l', module._handle_list_subjects_command)]:
+            self.command_handler(command)(self.personal_message('/' + command))
+            target.assert_not_called()
+            self.command_handler(command)(self.personal_message('/' + command, user=55))
+            self.assertEqual(target.call_args.args[1], 'owner')
+
+    def test_access_database_failure_is_reported_without_running_command(self):
+        module = self.member_bot()
+        module.get_db_connection.return_value = None
+        module._handle_grades_command = Mock()
+        module._bot_polling_loop('owner', '123:TEST', '55')
+        self.command_handler('grades')(self.personal_message())
+        module._handle_grades_command.assert_not_called()
+        self.assertTrue(any('bot_access_error' in str(c) for c in module.log.call_args_list))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn('Не удалось проверить доступ', self.calls[0]['rich']['markdown'])
+
+    def test_member_password_prompt_and_cancel_do_not_touch_owner_pending_change(self):
+        module = self.member_bot()
+        module._get_bot_token_for_registration = Mock(return_value='123:TEST')
+        module._pending_password_changes['owner'] = {'expires_at': datetime.max}
+        module._bot_polling_loop('owner', '123:TEST', '55')
+        self.command_handler('passwd')(self.personal_message('/passwd'))
+        self.assertIn('member', module._pending_password_changes)
+        self.command_handler('cancel')(self.personal_message('/cancel'))
+        self.assertNotIn('member', module._pending_password_changes)
+        self.assertIn('owner', module._pending_password_changes)
+
+
 class NotificationIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module('notification_delivery', {
@@ -543,9 +840,17 @@ class NotificationIntegrationTests(unittest.TestCase):
                                    {'type': 'grade', 'value': '2', 'subjectId': '10'}))
         private, group = self.send.call_args_list
         self.assertEqual(private.kwargs['notification_data']['value'], '2')
-        self.assertIsNone(group.kwargs['notification_data'])
+        self.assertNotIn('value', group.kwargs['notification_data'])
+        rich = formatting.notification(group.args[2], group.args[3], 'grade', group.kwargs['notification_data']).pages()[0][0]
+        self.assertNotIn('**Оценка**', rich)
         self.assertNotIn('2', group.args[2])
         self.assertEqual(group.kwargs['message_thread_id'], 7)
+
+    def test_history_success_does_not_mask_private_queue_failure(self):
+        self.send.side_effect = [False, True]
+        self.assertFalse(self.notify('grade', 'Оценка', 'Физика', {'id':'123','value':'5'}))
+        self.assertEqual(self.send.call_count, 2)
+        self.assertTrue(all(c.kwargs['durable'] for c in self.send.call_args_list))
 
     def test_homework_analysis_and_open_link_reach_both_destinations(self):
         analysis = {'estimable': True, 'total_minutes': 25, 'items': []}
@@ -554,7 +859,8 @@ class NotificationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.send.call_count, 2)
         for call in self.send.call_args_list:
             self.assertEqual(call.kwargs['analysis_data'], analysis)
-            self.assertTrue(call.kwargs['deep_link_url'].startswith('https://reschool.app/open?date=2026-09-11'))
+            self.assertEqual(parse_qs(urlsplit(call.kwargs['deep_link_url']).query), {
+                'type': ['homework'], 'date': ['2026-09-11'], 'subject': ['Физика']})
 
     def test_unmapped_subjects_are_sent_to_general_chat_with_analysis_and_attachments(self):
         analysis = {'estimable': True, 'total_minutes': 30, 'range_min': 20, 'range_max': 45}
@@ -584,7 +890,9 @@ class NotificationIntegrationTests(unittest.TestCase):
         self.notify('grade', '📝 Оценка: 2', 'Геометрия', {'value': '2', 'subjectId': '3517'})
         group = self.send.call_args_list[1]
         self.assertEqual(group.args[2], '📝 Новая оценка')
-        self.assertIsNone(group.kwargs['notification_data'])
+        self.assertNotIn('value', group.kwargs['notification_data'])
+        rich = formatting.notification(group.args[2], group.args[3], 'grade', group.kwargs['notification_data']).pages()[0][0]
+        self.assertNotIn('**Оценка**', rich)
         self.assertIsNone(group.kwargs['message_thread_id'])
 
     def test_disabled_group_and_secondary_device_do_not_send_group_notifications(self):

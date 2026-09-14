@@ -1,10 +1,12 @@
 import 'dart:io';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'android_apk_update.dart';
 
 class UpdateInfo {
   final String version;
@@ -143,7 +145,13 @@ class UpdateService {
       bool isTestFlightPending = false;
 
       if (Platform.isAndroid) {
-        downloadUrl = 'https://github.com/$_repoOwner/$_repoName/releases/download/v$latestVersion/reSchool-v$latestVersion.apk';
+        var supportedAbis = <String>[];
+        try {
+          supportedAbis = (await DeviceInfoPlugin().androidInfo).supportedAbis;
+        } catch (e) {
+          debugPrint('$_logTag не удалось определить ABI, используем общий APK: $e');
+        }
+        downloadUrl = AndroidApkUpdate.downloadUrl(latestVersion, supportedAbis);
         debugPrint('$_logTag checkForUpdates: URL для Android APK: $downloadUrl');
       } else if (Platform.isWindows) {
         downloadUrl = 'https://github.com/$_repoOwner/$_repoName/releases/download/v$latestVersion/reSchool-windows.zip';
@@ -268,37 +276,12 @@ class UpdateService {
     final file = File('${dir.path}/reschool-${update.version}.apk');
     debugPrint('$_logTag _downloadAndInstallAndroid: путь для сохранения: ${file.path}');
 
-    // качаем файл
-    debugPrint('$_logTag _downloadAndInstallAndroid: начинаю скачивание...');
-    final request = http.Request('GET', Uri.parse(update.downloadUrl));
-    final response = await http.Client().send(request);
-
-    final contentLength = response.contentLength ?? 0;
-    debugPrint('$_logTag _downloadAndInstallAndroid: размер файла: ${(contentLength / 1024 / 1024).toStringAsFixed(2)} MB');
-    debugPrint('$_logTag _downloadAndInstallAndroid: HTTP статус: ${response.statusCode}');
-
-    int received = 0;
-    int lastLoggedPercent = 0;
-
-    final sink = file.openWrite();
-
-    await for (final chunk in response.stream) {
-      sink.add(chunk);
-      received += chunk.length;
-      if (contentLength > 0) {
-        final progress = received / contentLength;
-        onProgress(progress);
-
-        // логируем каждые 10%
-        final percent = (progress * 100).toInt();
-        if (percent >= lastLoggedPercent + 10) {
-          lastLoggedPercent = percent;
-          debugPrint('$_logTag _downloadAndInstallAndroid: скачано $percent% (${(received / 1024 / 1024).toStringAsFixed(2)} MB)');
-        }
-      }
-    }
-
-    await sink.close();
+    await AndroidApkUpdate.download(
+      version: update.version,
+      url: update.downloadUrl,
+      file: file,
+      onProgress: onProgress,
+    );
     debugPrint('$_logTag _downloadAndInstallAndroid: скачивание завершено, файл сохранён');
 
     // отдаём apk установщику

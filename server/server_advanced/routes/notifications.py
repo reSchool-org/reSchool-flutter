@@ -32,13 +32,12 @@ from .verification import (find_verified_sender, get_verified_name,
 from ..notification_delivery import (
     save_notification_history,
     send_notification_with_telegram,
-    send_telegram_relogin_notice,
     get_telegram_info,
 )
 from .. import analysis
 from ..school_dates import school_date, school_datetime
 from .. import chat_notifications
-from ..telegram_bot import start_telegram_bot, stop_telegram_bot, restart_all_telegram_bots, send_telegram_message, request_topic_detect, get_and_clear_detected_topic, create_group_activation_code
+from ..telegram_bot import start_telegram_bot, stop_telegram_bot, restart_all_telegram_bots, send_telegram_message, send_group_connected_notice, request_topic_detect, get_and_clear_detected_topic, create_group_activation_code
 from ..encryption import init_encryption, encrypt_password, decrypt_password
 from ..keep_alive import update_session, get_session, mark_account_session_invalid
 
@@ -698,45 +697,27 @@ def fetch_data_with_session(cookies, username):
         return None, None, None, None, False, None
 
 
-def get_periods_for_user(username, password):
+def _read_session_api(url, cookies, registration_id=None, **kwargs):
+    """чтение данных не должно запускать вход с сохранённым паролем"""
+    if not cookies:
+        if registration_id:
+            mark_account_session_invalid(registration_id, reason='session_missing', notify=True)
+        raise RuntimeError('Нужно войти в eSchool. Нажмите «Войти снова».')
+    response = requests.get(url, cookies=cookies, **kwargs)
+    if response.status_code in (401, 403):
+        if registration_id:
+            mark_account_session_invalid(registration_id, reason='session_expired', notify=True)
+        raise RuntimeError('Подключение истекло. Нажмите «Войти снова».')
+    return response
+
+
+def get_periods_for_user(cookies, registration_id=None):
     """периоды собираем по всем классам и учебным годам, как в приложении"""
-    password_hash = sha256_hash(password)
-    device_id = generate_random_string(16).lower()
-    push_token = generate_random_string(152)
-    device_model = get_random_device_model()
-
-    device_payload = {
-        "cliType": "mobile",
-        "cliVer": "7.4.0",
-        "pushToken": push_token,
-        "deviceId": device_id,
-        "deviceName": "-",
-        "deviceModel": device_model,
-        "cliOs": "android",
-        "cliOsVer": "9"
-    }
-
-    body = {
-        "username": username,
-        "password": password_hash,
-        "device": json.dumps(device_payload)
-    }
-
-    headers = _build_api_headers("application/x-www-form-urlencoded")
-
+    headers = _build_api_headers()
     try:
-        # входим
-        url = f"{BASE_URL}/login"
-        response = requests.post(url, data=body, headers=headers, timeout=30)
-
-        if response.status_code != 200:
-            return None, None, "Ошибка входа"
-
-        cookies = response.cookies
-
         # из state достаём userId
         state_url = f"{BASE_URL}/state"
-        state_resp = requests.get(state_url, headers=headers, cookies=cookies, timeout=30)
+        state_resp = _read_session_api(state_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         if state_resp.status_code != 200:
             return None, None, "Ошибка получения состояния"
 
@@ -747,7 +728,7 @@ def get_periods_for_user(username, password):
 
         # тянем все классы и группы пользователя, каждый класс это учебный год
         class_url = f"{BASE_URL}/usr/getClassByUser?userId={user_id}"
-        class_resp = requests.get(class_url, headers=headers, cookies=cookies, timeout=30)
+        class_resp = _read_session_api(class_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         if class_resp.status_code != 200:
             return None, None, "Ошибка получения класса"
 
@@ -825,7 +806,7 @@ def get_periods_for_user(username, password):
 
             # периоды этого класса или группы
             periods_url = f"{BASE_URL}/dict/periods/0?groupId={group_id}"
-            periods_resp = requests.get(periods_url, headers=headers, cookies=cookies, timeout=30)
+            periods_resp = _read_session_api(periods_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
             if periods_resp.status_code != 200:
                 continue
 
@@ -846,42 +827,12 @@ def get_periods_for_user(username, password):
         return None, None, f"Ошибка: {e}"
 
 
-def get_subjects_for_user(username, password):
+def get_subjects_for_user(cookies, registration_id=None):
     """справочник предметов получаем из уроков дневника"""
-    password_hash = sha256_hash(password)
-    device_id = generate_random_string(16).lower()
-    push_token = generate_random_string(152)
-    device_model = get_random_device_model()
-
-    device_payload = {
-        "cliType": "mobile",
-        "cliVer": "7.4.0",
-        "pushToken": push_token,
-        "deviceId": device_id,
-        "deviceName": "-",
-        "deviceModel": device_model,
-        "cliOs": "android",
-        "cliOsVer": "9"
-    }
-
-    body = {
-        "username": username,
-        "password": password_hash,
-        "device": json.dumps(device_payload)
-    }
-
-    headers = _build_api_headers("application/x-www-form-urlencoded")
-
+    headers = _build_api_headers()
     try:
-        # входим
-        response = requests.post(f"{BASE_URL}/login", data=body, headers=headers, timeout=30)
-        if response.status_code != 200:
-            return None, "Ошибка входа"
-
-        cookies = response.cookies
-
         # выясняем prsId
-        state_resp = requests.get(f"{BASE_URL}/state", headers=headers, cookies=cookies, timeout=30)
+        state_resp = _read_session_api(f"{BASE_URL}/state", headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         if state_resp.status_code != 200:
             return None, "Ошибка получения состояния"
 
@@ -897,7 +848,7 @@ def get_subjects_for_user(username, password):
         d2 = int((today + timedelta(days=180)).timestamp() * 1000)
 
         diary_url = f"{BASE_URL}/student/getPrsDiary?prsId={prs_id}&d1={d1}&d2={d2}"
-        diary_resp = requests.get(diary_url, headers=headers, cookies=cookies, timeout=30)
+        diary_resp = _read_session_api(diary_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         if diary_resp.status_code != 200:
             return None, f"Ошибка получения дневника: {diary_resp.status_code}"
 
@@ -933,52 +884,13 @@ def get_subjects_for_user(username, password):
         return None, f"Ошибка: {e}"
 
 
-def get_grades_for_period(username, password, period_id):
+def get_grades_for_period(cookies, period_id, registration_id=None):
     """итоги берём из getDiaryUnits, отдельные оценки из getDiaryPeriod_, как в приложении"""
-    password_hash = sha256_hash(password)
-    device_id = generate_random_string(16).lower()
-    push_token = generate_random_string(152)
-    device_model = get_random_device_model()
-
-    device_payload = {
-        "cliType": "mobile",
-        "cliVer": "7.4.0",
-        "pushToken": push_token,
-        "deviceId": device_id,
-        "deviceName": "-",
-        "deviceModel": device_model,
-        "cliOs": "android",
-        "cliOsVer": "9"
-    }
-
-    body = {
-        "username": username,
-        "password": password_hash,
-        "device": json.dumps(device_payload)
-    }
-
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "ru-RU,en,*",
-        "Origin": "https://app.eschool.center",
-        "Referer": "https://app.eschool.center/",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
+    headers = _build_api_headers()
     try:
-        # входим
-        url = f"{BASE_URL}/login"
-        response = requests.post(url, data=body, headers=headers, timeout=30)
-
-        if response.status_code != 200:
-            return None, None, None, "Ошибка входа"
-
-        cookies = response.cookies
-
         # из state достаём userId
         state_url = f"{BASE_URL}/state"
-        state_resp = requests.get(state_url, headers=headers, cookies=cookies, timeout=30)
+        state_resp = _read_session_api(state_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         if state_resp.status_code != 200:
             return None, None, None, "Ошибка получения состояния"
 
@@ -991,7 +903,7 @@ def get_grades_for_period(username, password, period_id):
         # запрос: /student/getDiaryUnits/?userId={userId}&eiId={periodId}
         # ответ: {result: [{unitId, unitName, overMark, totalMark, rating}]}
         units_url = f"{BASE_URL}/student/getDiaryUnits/?userId={user_id}&eiId={period_id}"
-        units_resp = requests.get(units_url, headers=headers, cookies=cookies, timeout=30)
+        units_resp = _read_session_api(units_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         if units_resp.status_code != 200:
             return None, None, None, f"Ошибка получения предметов: {units_resp.status_code}"
 
@@ -1002,7 +914,7 @@ def get_grades_for_period(username, password, period_id):
         # запрос: /student/getDiaryPeriod_/?userId={userId}&eiId={periodId}
         # ответ: {result: [{lessonId, unitId, part: [{mark: [{markValue}], mrkWt}]}]}
         diary_url = f"{BASE_URL}/student/getDiaryPeriod_/?userId={user_id}&eiId={period_id}"
-        diary_resp = requests.get(diary_url, headers=headers, cookies=cookies, timeout=30)
+        diary_resp = _read_session_api(diary_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
 
         # раскладываем оценки по unitId
         marks_by_unit = {}
@@ -1062,7 +974,7 @@ def get_grades_for_period(username, password, period_id):
 
         # название периода вытаскиваем из списка периодов
         class_url = f"{BASE_URL}/usr/getClassByUser?userId={user_id}"
-        class_resp = requests.get(class_url, headers=headers, cookies=cookies, timeout=30)
+        class_resp = _read_session_api(class_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
         period_name = f"Период {period_id}"
 
         def find_period_name(items, target_id):
@@ -1083,7 +995,7 @@ def get_grades_for_period(username, password, period_id):
                 group_id = classes[0].get('groupId')
                 if group_id:
                     periods_url = f"{BASE_URL}/dict/periods/0?groupId={group_id}"
-                    periods_resp = requests.get(periods_url, headers=headers, cookies=cookies, timeout=30)
+                    periods_resp = _read_session_api(periods_url, headers=headers, cookies=cookies, registration_id=registration_id, timeout=30)
                     if periods_resp.status_code == 200:
                         periods_data = periods_resp.json()
                         found_name = find_period_name(periods_data.get('items', []), period_id)
@@ -1332,14 +1244,16 @@ def login_and_get_data(username, password):
 def _notify_classmates(grade_class, title, body, data=None, exclude_classmate_id=None, exclude_registration_id=None):
     """история доступна одноклассникам и администраторам выбранного класса"""
     if not grade_class:
-        return
+        return True
     conn = get_db_connection()
     if not conn:
-        return
+        return False
     try:
         cursor = conn.cursor(dictionary=True)
         data_json = json_value(data or {})
         notif_type = (data or {}).get('type', 'homework')
+        cursor.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))',
+                       (f'class-history:{grade_class}',))
 
         # одноклассники
         cursor.execute(
@@ -1356,10 +1270,14 @@ def _notify_classmates(grade_class, title, body, data=None, exclude_classmate_id
                 cursor.execute("""
                     INSERT INTO classmate_notification_history
                         (classmate_id, notification_type, title, body, data)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (row['id'], notif_type, title, body, data_json))
+                    SELECT %s, %s, %s, %s, %s WHERE NOT EXISTS (
+                        SELECT 1 FROM classmate_notification_history WHERE classmate_id = %s
+                        AND notification_type = %s AND title = %s AND body = %s AND data = %s)
+                """, (row['id'], notif_type, title, body, data_json,
+                       row['id'], notif_type, title, body, data_json))
             except Exception as e:
                 log(f"[Classmate] History store error: {e}")
+                raise
 
         # админы, они же cf3_registrations
         cursor.execute(
@@ -1376,10 +1294,14 @@ def _notify_classmates(grade_class, title, body, data=None, exclude_classmate_id
                 cursor.execute("""
                     INSERT INTO cf3_notification_history
                         (registration_id, notification_type, title, body, data)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (row['id'], notif_type, title, body, data_json))
+                    SELECT %s, %s, %s, %s, %s WHERE NOT EXISTS (
+                        SELECT 1 FROM cf3_notification_history WHERE registration_id = %s
+                        AND notification_type = %s AND title = %s AND body = %s AND data = %s)
+                """, (row['id'], notif_type, title, body, data_json,
+                       row['id'], notif_type, title, body, data_json))
             except Exception as e:
                 log(f"[Classmate] Admin history store error: {e}")
+                raise
 
         conn.commit()
         cursor.close()
@@ -1388,8 +1310,10 @@ def _notify_classmates(grade_class, title, body, data=None, exclude_classmate_id
         total = len(classmate_rows) + len(admin_rows)
         if total:
             log(f"[Classmate] Notified {len(classmate_rows)} classmates + {len(admin_rows)} admins in class={grade_class}: {title}")
+        return True
     except Exception as e:
         log(f"[Classmate] _notify_classmates error: {e}")
+        return False
     finally:
         conn.close()
 
@@ -1425,7 +1349,8 @@ def _chat_delivery(registration, telegram_info):
             if user_id:
                 targets[f'telegram:{user_id}'] = lambda: send_telegram_message(
                     bot_token, user_id, event['title'], event['body'],
-                    notification_type='message', notification_data=event.get('telegram'),
+                    notification_type='message', notification_data={**event.get('telegram', {}), **event['data']},
+                    durable=True,
                 )
             group_id = telegram_info.get('telegram_group_chat_id')
             thread_key = event['data']['id']
@@ -1436,7 +1361,8 @@ def _chat_delivery(registration, telegram_info):
                     targets[f'telegram:{group_id}:{topic_id or 0}'] = lambda: send_telegram_message(
                         bot_token, group_id, event['title'], event['body'],
                         message_thread_id=topic_id,
-                        notification_type='message', notification_data=event.get('telegram'),
+                        notification_type='message', notification_data={**event.get('telegram', {}), **event['data']},
+                        durable=True,
                     )
         for key, send in targets.items():
             if key in completed or key in failed:
@@ -1557,8 +1483,6 @@ def _check_user_for_updates(registration):
     """при изменении дневника сохраняем историю и уведомляем телеграм"""
     reg_id = registration['id']
     username = registration['username']
-    encrypted_password = registration['password']
-
     if registration.get('session_invalid'):
         log(f"[Notify] Skipping invalid session for {username}")
         return
@@ -1603,24 +1527,10 @@ def _check_user_for_updates(registration):
             log(f"[Notify] Session fetch failed (non-401) for {username}, skipping check")
             return
 
-    # полный вход делаем, только если переиспользовать было нечего,
-    # если сессия протухла, аккаунт выше ставится на паузу и в eSchool
-    # мы больше не ходим, пока пользователь заново не войдёт из приложения
     if homework_list is None:
-        password = decrypt_password(encrypted_password)
-        if not password:
-            log(f"[Notify] Failed to decrypt password for {username}")
-            return
-
-        log(f"[Notify] Re-logging in for {username}")
-        homework_list, grades_list, notifications_list, _, cookies, prs_id = login_and_get_data(username, password)
-
-        if homework_list is None:
-            log(f"[Notify] Failed to fetch data for {username}")
-            return
-
-        update_session(reg_id, cookies)
-        send_telegram_relogin_notice(reg_id, username)
+        # отсутствие куки не разрешает фоновый вход с сохранённым паролем
+        mark_account_session_invalid(reg_id, username, "session_missing", notify=True)
+        return
 
     # ищем новое и изменившееся домашнее задание
     current_hw_ids = {int(hw['id']) for hw in homework_list if hw.get('id') is not None}
@@ -1669,6 +1579,8 @@ def _check_user_for_updates(registration):
         elif hw.get('hasFiles'):
             body_lines.append('[Прикреплены файлы]')
         hw_data = {'type': 'homework', 'id': str(hw['id'])}
+        if hw.get('lessonId'):
+            hw_data['lessonId'] = str(hw['lessonId'])
         hw_subject_id = _normalize_key(hw.get('subjectId'))
         if hw_subject_id is not None:
             hw_data['subjectId'] = str(hw_subject_id)
@@ -1686,7 +1598,7 @@ def _check_user_for_updates(registration):
 
     def _send_hw_notification(hw, title_prefix, notice=None):
         notice = notice or _hw_notification_payload(hw, title_prefix)
-        send_notification_with_telegram(
+        accepted = send_notification_with_telegram(
 
             notice['title'],
             notice['body'],
@@ -1698,6 +1610,8 @@ def _check_user_for_updates(registration):
             telegram_attachment_cookies=telegram_attachment_cookies,
 
         )
+        if accepted is False:
+            raise RuntimeError(f"Homework notification not queued: source_id={hw.get('id')}")
 
     def _handle_hw(hw, title_prefix):
         """уведомление о домашнем задании ждёт разбор, если он включён"""
@@ -1752,20 +1666,21 @@ def _check_user_for_updates(registration):
         if analysis_id:
             return
         _send_hw_notification(hw, title_prefix, notice)
-        _notify_classmates(grade_class, f"{title_prefix}{subject}", hw_text[:120], class_data)
+        if _notify_classmates(grade_class, f"{title_prefix}{subject}", hw_text[:120], class_data) is False:
+            raise RuntimeError(f"Classmate history not persisted: source_id={hw.get('id')}")
 
     if new_hw_ids:
         log(f"[Notify] New HW IDs: {new_hw_ids}")
         new_hw = [hw for hw in homework_list if hw.get('id') is not None and int(hw['id']) in new_hw_ids]
-        for hw in new_hw[:3]:
+        for hw in new_hw:
             _handle_hw(hw, "📚 ДЗ: ")
-        log(f"[Notify] Sent {min(len(new_hw), 3)} new homework notifications for {username}")
+        log(f"[Notify] Queued {len(new_hw)} new homework notifications for {username}")
 
     if changed_hw:
         log(f"[Notify] Changed HW IDs: {[hw['id'] for hw in changed_hw]}")
-        for hw in changed_hw[:3]:
+        for hw in changed_hw:
             _handle_hw(hw, "✏️ ДЗ изменено: ")
-        log(f"[Notify] Sent {min(len(changed_hw), 3)} changed homework notifications for {username}")
+        log(f"[Notify] Queued {len(changed_hw)} changed homework notifications for {username}")
 
     # ищем новые и изменившиеся оценки
     current_grade_ids = {int(g['id']) for g in grades_list if g.get('id') is not None}
@@ -1798,10 +1713,15 @@ def _check_user_for_updates(registration):
             f"Коэффициент: {grade_weight}"
         )
         grade_data = {'type': 'grade', 'id': str(g['id']), 'value': grade_value}
+        grade_data['subject'] = subject
+        if g.get('date'):
+            grade_data['date'] = school_date(g['date'])
+        if g.get('lessonId'):
+            grade_data['lessonId'] = str(g['lessonId'])
         grade_subject_id = _normalize_key(g.get('subjectId'))
         if grade_subject_id is not None:
             grade_data['subjectId'] = str(grade_subject_id)
-        send_notification_with_telegram(
+        accepted = send_notification_with_telegram(
 
             f"{title_prefix}{grade_value}",
             grade_body,
@@ -1810,19 +1730,21 @@ def _check_user_for_updates(registration):
             notification_type='grade',
 
         )
+        if accepted is False:
+            raise RuntimeError(f"Grade notification not queued: source_id={g['id']}")
 
     if new_grade_ids:
         log(f"[Notify] New Grade IDs: {new_grade_ids}")
         new_grades = [g for g in grades_list if g.get('id') is not None and int(g['id']) in new_grade_ids]
-        for g in new_grades[:5]:
+        for g in new_grades:
             _send_grade_notification(g, "📝 Оценка: ")
-        log(f"[Notify] Sent {min(len(new_grades), 5)} new grade notifications for {username}")
+        log(f"[Notify] Queued {len(new_grades)} new grade notifications for {username}")
 
     if changed_grades:
         log(f"[Notify] Changed Grade IDs: {[g['id'] for g in changed_grades]}")
-        for g in changed_grades[:3]:
+        for g in changed_grades:
             _send_grade_notification(g, "✏️ Оценка изменена: ")
-        log(f"[Notify] Sent {min(len(changed_grades), 3)} changed grade notifications for {username}")
+        log(f"[Notify] Queued {len(changed_grades)} changed grade notifications for {username}")
 
     _check_chat_updates(registration, notifications_list, cookies, prs_id)
 
@@ -1953,6 +1875,8 @@ def start_notification_monitor():
         return
 
     _monitor_running = True
+    from ..telegram_outbox import start as start_outbox
+    start_outbox()
     _monitor_thread = threading.Thread(target=notification_monitor_loop, daemon=True)
     _monitor_thread.start()
     log("[Notify] Monitor thread started")
@@ -1967,6 +1891,8 @@ def stop_notification_monitor():
     """останавливаем поток мониторинга"""
     global _monitor_running
     _monitor_running = False
+    from ..telegram_outbox import stop as stop_outbox
+    stop_outbox()
     log("[Notify] Monitor stop requested")
 
 
@@ -2550,6 +2476,9 @@ def cf3_update_telegram_group():
     if owner_error:
         return owner_error
 
+    if group_enabled and not group_chat_id:
+        return jsonify(error='Сначала подключите группу'), 400
+
     # topic_map приводим к строке json
     topic_map_str = None
     if topic_map_raw is not None:
@@ -2569,12 +2498,17 @@ def cf3_update_telegram_group():
     if not conn:
         return jsonify({"error": "Database connection failed"}), 500
 
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id FROM cf3_registrations WHERE id = %s", (registration_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        # блокируем общую регистрацию, чтобы устройства не меняли настройки одновременно
+        # порядок блокировок должен совпадать с триггерами общих настроек
+        cursor.execute('SELECT pg_advisory_xact_lock(7723002)')
+        cursor.execute("""SELECT id, telegram_group_enabled, telegram_group_chat_id
+            FROM cf3_registrations WHERE id = COALESCE(cf3_account_primary(%s), %s)
+            FOR UPDATE""", (registration_id, registration_id))
+        previous = cursor.fetchone()
+        if not previous:
             return jsonify({"error": "Registration not found"}), 404
 
         if topic_map_str is not None:
@@ -2595,16 +2529,26 @@ def cf3_update_telegram_group():
                 WHERE id = %s
             """, (group_enabled, group_chat_id, group_title, registration_id))
 
+        newly_connected = group_enabled and (
+            not previous.get('telegram_group_enabled') or
+            str(previous.get('telegram_group_chat_id') or '') != str(group_chat_id))
+        if newly_connected and not send_group_connected_notice(
+                previous['id'], group_chat_id, group_title, connection=conn):
+            conn.rollback()
+            return jsonify(error='Не удалось сохранить подтверждение подключения. Попробуйте ещё раз.'), 503
         conn.commit()
-        cursor.close()
-        conn.close()
 
         log(f"[Notify] Telegram group updated for {registration_id}: enabled={group_enabled}, chatId={group_chat_id}")
         return jsonify({"success": True})
 
     except Exception as e:
+        conn.rollback()
         log(f"[Notify] Update Telegram group error: {e}")
         return jsonify({"error": "Database error"}), 500
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
 
 
 @bp.route('/get-group-info', methods=['POST'])
@@ -2629,7 +2573,7 @@ def cf3_get_group_info():
         cursor.execute("""
             SELECT telegram_group_enabled, telegram_group_chat_id, telegram_group_title,
                    telegram_topic_map, known_subjects,
-                   username, password_encrypted
+                   username, session_invalid
             FROM cf3_registrations WHERE id = %s
         """, (registration_id,))
         reg = cursor.fetchone()
@@ -2659,10 +2603,8 @@ def cf3_get_group_info():
 
     # дополняем полным списком предметов из api, диапазон дневника берём шире
     try:
-        from ..encryption import decrypt_password
-        password = decrypt_password(reg['password_encrypted'])
-        if password:
-            api_subjects, _ = get_subjects_for_user(reg['username'], password)
+        if not reg.get('session_invalid'):
+            api_subjects, _ = get_subjects_for_user(get_session(registration_id), registration_id)
             if api_subjects:
                 for item in api_subjects:
                     sid = str(item.get('id') or '').strip()

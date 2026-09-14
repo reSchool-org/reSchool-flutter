@@ -97,6 +97,6 @@ def restart_server_bot():
         finally:
             cursor.close()
             conn.close()
-    # один опрос на весь токен, пользователям нужны только личные доставки
+    # одного опроса на токен достаточно, личные команды выбирают регистрацию отправителя
     _active_server_bot = owner or '__server__'
     start_telegram_bot(_active_server_bot, bot['token'], user_id or '0')

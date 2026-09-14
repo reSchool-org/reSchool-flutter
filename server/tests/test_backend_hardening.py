@@ -350,7 +350,7 @@ class RegistrationVerificationIntegrationTests(unittest.TestCase):
                 'send_notification_with_telegram', 'send_telegram_relogin_notice', 'get_telegram_info')},
             f'{PACKAGE}.telegram_bot': {name: Mock() for name in (
                 'start_telegram_bot', 'stop_telegram_bot', 'restart_all_telegram_bots',
-                'send_telegram_message', 'request_topic_detect', 'get_and_clear_detected_topic',
+                'send_telegram_message', 'send_group_connected_notice', 'request_topic_detect', 'get_and_clear_detected_topic',
                 'create_group_activation_code')},
             f'{PACKAGE}.encryption': {
                 'init_encryption': Mock(return_value=True),

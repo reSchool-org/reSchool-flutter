@@ -51,25 +51,35 @@ jobs:
           umask 077
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-release.jks"
 
-      - name: Build signed APK and App Bundle
+      - name: Build signed APKs and App Bundle
         env:
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/android-release.jks
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version: *\([^+ ]*\).*/\1/p' pubspec.yaml)
+          test -n "$version"
+          mkdir -p dist/android
           flutter build apk --release --no-pub
+          # сохраняем до следующей сборки, это имя ожидают старые клиенты
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/android/reSchool-v${version}.apk"
+          flutter build apk --release --no-pub --split-per-abi
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            cp "build/app/outputs/flutter-apk/app-${abi}-release.apk" "dist/android/reSchool-v${version}-${abi}.apk"
+          done
           flutter build appbundle --release --no-pub
 
       - name: Remove signing material
         if: always()
         run: rm -f "$RUNNER_TEMP/android-release.jks"
 
-      - name: Upload APK
+      - name: Upload APKs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: android-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: dist/android/*.apk
           if-no-files-found: error
 
       - name: Upload App Bundle

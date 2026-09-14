@@ -299,8 +299,26 @@ struct WidgetRowView: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(Color(widgetARGB: palette.surface))
+        .background {
+            if #available(iOS 16.0, macOS 13.0, *) {
+                WidgetRowBackground(color: Color(widgetARGB: palette.surface))
+            } else {
+                Color(widgetARGB: palette.surface)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
+    }
+}
+
+@available(iOS 16.0, macOS 13.0, *)
+private struct WidgetRowBackground: View {
+    let color: Color
+    @Environment(\.widgetRenderingMode) private var renderingMode
+
+    var body: some View {
+        // в тонированном режиме текст и плотный фон становятся белыми
+        // делаем прозрачнее только фон, чтобы текст оставался читаемым
+        color.opacity(renderingMode == .accented ? 0.12 : 1)
     }
 }

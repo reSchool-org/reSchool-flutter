@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
-from test_backend_hardening import PACKAGE, load_module
+from test_backend_hardening import PACKAGE, SERVER, load_module
 from test_chat_notifications import make_chat, make_routes
 
 
@@ -333,8 +333,11 @@ class PendingDeliveryConcurrencyTests(unittest.TestCase):
             'id BIGSERIAL PRIMARY KEY, analysis_id BIGINT, audience TEXT, registration_id TEXT, '
             'grade_class TEXT, title TEXT, body TEXT, data JSONB, payload JSONB, '
             'exclude_classmate_id TEXT, exclude_registration_id TEXT, '
-            "status TEXT DEFAULT 'pending', sent_at TIMESTAMP)"
+            "status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'dropped')), sent_at TIMESTAMP)"
         ).format(sql.Identifier(self.schema)))
+        self.admin.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
+        self.admin.execute((SERVER / 'server_advanced/migrations/0010_notification_delivery_status.sql').read_text())
+        self.admin.execute((SERVER / 'server_advanced/migrations/0011_telegram_outbox.sql').read_text())
         def connect():
             conn = psycopg.connect(os.environ['RESCHOOL_TEST_DATABASE_URL'])
             conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
@@ -379,6 +382,40 @@ class PendingDeliveryConcurrencyTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 list(pool.map(self.analysis.flush, [10, 10]))
         delivery.send_notification_with_telegram.assert_called_once()
+
+    def test_status_is_sending_during_delivery_and_failed_result_is_not_marked_sent(self):
+        self.enqueue(6130662)
+        delivery = types.ModuleType(f'{PACKAGE}.notification_delivery')
+        def fail(*args, **kwargs):
+            with self.connect() as conn:
+                self.assertEqual(conn.execute('SELECT status, sent_at FROM pending_notifications').fetchone(),
+                                 ('sending', None))
+            return False
+        delivery.send_notification_with_telegram = Mock(side_effect=fail)
+        routes = types.ModuleType(f'{PACKAGE}.routes.notifications')
+        routes._notify_classmates = Mock()
+        with patch.dict('sys.modules', {delivery.__name__: delivery, routes.__name__: routes}):
+            self.analysis.flush(10)
+            self.analysis.flush(10)
+        delivery.send_notification_with_telegram.assert_called_once()
+        with self.connect() as conn:
+            row = conn.execute('SELECT status, sent_at, last_error FROM pending_notifications').fetchone()
+            self.assertEqual(row[:2], ('failed', None))
+            self.assertIn('delivery_failed', row[2])
+
+    def test_success_is_marked_sent_after_delivery(self):
+        self.enqueue(6130662)
+        delivery = types.ModuleType(f'{PACKAGE}.notification_delivery')
+        delivery.send_notification_with_telegram = Mock(return_value=True)
+        routes = types.ModuleType(f'{PACKAGE}.routes.notifications')
+        routes._notify_classmates = Mock()
+        with patch.dict('sys.modules', {delivery.__name__: delivery, routes.__name__: routes}):
+            self.analysis.flush(10)
+        with self.connect() as conn:
+            status, sent_at, error = conn.execute('SELECT status, sent_at, last_error FROM pending_notifications').fetchone()
+            self.assertEqual(status, 'sent')
+            self.assertIsNotNone(sent_at)
+            self.assertIsNone(error)
 
 
 if __name__ == '__main__':

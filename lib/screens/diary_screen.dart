@@ -28,9 +28,11 @@ class DiaryScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final settings = Provider.of<SettingsProvider>(context, listen: false);
     final now = DateTime.now();
-    final initialDate = settings.diaryInitialDay == 'tomorrow'
-        ? now.add(const Duration(days: 1))
-        : now;
+    final initialDate =
+        DiaryNavigationService.instance.pending.value?.date ??
+        (settings.diaryInitialDay == 'tomorrow'
+            ? now.add(const Duration(days: 1))
+            : now);
     return ChangeNotifierProvider(
       create: (_) => DiaryViewModel(
         Provider.of<BellScheduleProvider>(context, listen: false),
@@ -56,6 +58,8 @@ class _DiaryViewState extends State<DiaryView>
   Timer? _timer;
   DateTime? _lastLoadedWeekStart;
   String? _lastCloudConnection;
+  DiaryViewModel? _navigationViewModel;
+  bool _navigationScheduled = false;
 
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
@@ -137,56 +141,74 @@ class _DiaryViewState extends State<DiaryView>
   }
 
   void _handlePendingNavigation() {
-    final req = DiaryNavigationService.instance.consume();
-    if (req == null || !mounted) return;
+    if (!mounted || _navigationScheduled) return;
+    _navigationScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _navigationScheduled = false;
+      if (mounted) _applyPendingNavigation();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
 
+  void _applyPendingNavigation() {
+    final service = DiaryNavigationService.instance;
+    final req = service.pending.value;
+    if (req == null) return;
     final vm = context.read<DiaryViewModel>();
-
-    if (req.date != null) {
-      final target = req.date!;
+    final target = req.date ?? vm.selectedDate;
+    if (!vm.isSameDay(vm.selectedDate, target)) vm.selectDate(target);
+    // пролистывание промежуточных дней может перезаписать цель перехода
+    if (_pageController.hasClients) {
       _isProgrammaticPageChange = true;
-      vm.selectDate(target);
-      final index = _getDateIndex(target);
-      if (_pageController.hasClients) {
-        _pageController.animateToPage(
-          index,
-          duration: const Duration(milliseconds: 350),
-          curve: Curves.easeInOut,
-        );
-      }
-      Future.delayed(const Duration(milliseconds: 50), () {
-        _isProgrammaticPageChange = false;
+      _pageController.jumpToPage(_getDateIndex(target));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _isProgrammaticPageChange = false;
       });
     }
-
-    if (req.subject != null) {
-      final subject = req.subject!;
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (!mounted) return;
-        final lessons = vm.getLessonsForDate(vm.selectedDate);
-        final matches = lessons
-            .where(
-              (l) => l.subject.toLowerCase().contains(subject.toLowerCase()),
-            )
-            .toList();
-        if (matches.isEmpty) return;
-        showModalBottomSheet(
-          context: context,
-          isScrollControlled: true,
-          backgroundColor: Colors.transparent,
-          builder: (_) => LessonDetailSheet(
-            lesson: matches.first,
-            lessonDate: vm.selectedDate,
-          ),
-        );
-      });
+    if (req.subject == null && req.lessonId == null) {
+      service.complete(req);
+      return;
     }
+    // ждём расписание и дополнения к дз, при ошибке оставляем запрос для повтора
+    if (vm.isLoading || vm.error != null) return;
+    final lessons = vm.getLessonsForDate(target).where((l) => !l.isPlaceholder);
+    final subject = req.subject?.trim().toLowerCase();
+    final lesson = req.lessonId != null
+        ? lessons.where((l) => l.id == req.lessonId).firstOrNull
+        : lessons
+                  .where((l) => l.subject.trim().toLowerCase() == subject)
+                  .firstOrNull ??
+              (subject == null || subject.isEmpty
+                  ? null
+                  : lessons
+                        .where((l) => l.subject.toLowerCase().contains(subject))
+                        .firstOrNull);
+    service.complete(req);
+    if (lesson == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Урок из ссылки не найден на выбранную дату.'),
+        ),
+      );
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => LessonDetailSheet(lesson: lesson, lessonDate: target),
+    );
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final vm = context.read<DiaryViewModel>();
+    if (!identical(_navigationViewModel, vm)) {
+      _navigationViewModel?.removeListener(_handlePendingNavigation);
+      _navigationViewModel = vm;
+      vm.addListener(_handlePendingNavigation);
+    }
     final initialIndex = _getDateIndex(vm.selectedDate);
     if (_pageController.hasClients) {
       if ((_pageController.page?.round() ?? 0) != initialIndex &&
@@ -203,6 +225,7 @@ class _DiaryViewState extends State<DiaryView>
     DiaryNavigationService.instance.pending.removeListener(
       _handlePendingNavigation,
     );
+    _navigationViewModel?.removeListener(_handlePendingNavigation);
     _pageController.dispose();
     _animationController.dispose();
     _timer?.cancel();

@@ -31,6 +31,7 @@ class ChatDetailScreen extends StatefulWidget {
   final bool embedded;
   final VoidCallback? onBack;
   final ChatSearchHit? searchHit;
+  final int? initialMessageNumber;
 
   const ChatDetailScreen({
     super.key,
@@ -43,6 +44,7 @@ class ChatDetailScreen extends StatefulWidget {
     this.embedded = false,
     this.onBack,
     this.searchHit,
+    this.initialMessageNumber,
   });
 
   @override
@@ -119,8 +121,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
   Future<void> _loadInitialMessages() async {
     final numbers = _searchHit?.messageNumbers ?? [];
     await _viewModel.loadMessages(
-      aroundMessage: numbers.isEmpty ? null : numbers[_matchIndex],
-      matches: numbers.isEmpty ? null : numbers,
+      aroundMessage: numbers.isEmpty
+          ? widget.initialMessageNumber
+          : numbers[_matchIndex],
+      matches: numbers.isEmpty
+          ? (widget.initialMessageNumber == null
+                ? null
+                : [widget.initialMessageNumber!])
+          : numbers,
       searchText: _searchHit?.query,
     );
     if (mounted) _scrollToBottom();
@@ -780,9 +788,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen>
                             return _MessageBubble(
                               key: ValueKey(message.id),
                               highlighted:
-                                  _searchHit?.messageNumbers.elementAtOrNull(
-                                        _matchIndex,
-                                      ) ==
+                                  (_searchHit?.messageNumbers.elementAtOrNull(
+                                            _matchIndex,
+                                          ) ??
+                                          widget.initialMessageNumber) ==
                                       message.msgNum &&
                                   message.msgNum != null,
                               message: message,

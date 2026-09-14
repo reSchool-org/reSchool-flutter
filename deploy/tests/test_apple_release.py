@@ -30,7 +30,7 @@ def make_app(app, platform="macos"):
         contents.mkdir(parents=True)
         data = {"CFBundleIdentifier": apple.BUNDLE if bundle == app else apple.BUNDLE + (
                     ".ReSchoolWidgets" if platform == "ios" else ".ReSchoolMacWidgets"),
-                "CFBundleShortVersionString": "2.0.0", "CFBundleVersion": "1.1.1",
+                "CFBundleShortVersionString": "2.0.1", "CFBundleVersion": "1.1.1",
                 "CFBundleExecutable": "reschool"}
         if platform == "macos":
             data.update(CFBundleSupportedPlatforms=["MacOSX"], DTPlatformName="macosx",
@@ -60,8 +60,8 @@ def mac_tool_output(*args, **kwargs):
 
 class ReleaseValidationTests(unittest.TestCase):
     def test_version_and_counter(self):
-        self.assertEqual(apple.version_values("2.0.0", "101"), ("2.0.0", "1.1.1"))
-        self.assertEqual(apple.version_values("2.0.0", "10001"), ("2.0.0", "2.0.1"))
+        self.assertEqual(apple.version_values("2.0.1", "101"), ("2.0.1", "1.1.1"))
+        self.assertEqual(apple.version_values("2.0.1", "10001"), ("2.0.1", "2.0.1"))
         for version, build in [("1;exit", "1"), ("1.0", "1"), ("1.0.0", "0"),
                                ("1.0.0", "100000000"), ("1.0.0", "-1")]:
             with self.assertRaises(ValueError):
@@ -169,9 +169,9 @@ class IOSReleaseEntitlementTests(unittest.TestCase):
                 with self.subTest(push=push), mock.patch.object(apple, "run", side_effect=output):
                     if push == "development":
                         with self.assertRaisesRegex(ValueError, "APNs must use production"):
-                            apple.verify_app(app, "ios", "2.0.0", "1.1.1", signed=True)
+                            apple.verify_app(app, "ios", "2.0.1", "1.1.1", signed=True)
                     else:
-                        apple.verify_app(app, "ios", "2.0.0", "1.1.1", signed=True)
+                        apple.verify_app(app, "ios", "2.0.1", "1.1.1", signed=True)
 
 
 class NativeMacTests(unittest.TestCase):
@@ -184,7 +184,7 @@ class NativeMacTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def verify(self, signed=False):
-        apple.verify_app(self.app, "macos", "2.0.0", "1.1.1", signed)
+        apple.verify_app(self.app, "macos", "2.0.1", "1.1.1", signed)
 
     def test_native_universal_app_and_widget_with_legacy_intel_load_command(self):
         for signed in (False, True):
@@ -308,13 +308,13 @@ class PackageTests(unittest.TestCase):
                     return b""
                 run.side_effect = expand
                 if count == 1:
-                    apple.verify_pkg(artifact, "2.0.0", "1.1.1", state)
+                    apple.verify_pkg(artifact, "2.0.1", "1.1.1", state)
                     verify.assert_called_once_with(
                         expanded / "component0.pkg/Payload/Applications/app0.app",
-                        "macos", "2.0.0", "1.1.1", signed=True)
+                        "macos", "2.0.1", "1.1.1", signed=True)
                 else:
                     with self.assertRaisesRegex(ValueError, "exactly one app"):
-                        apple.verify_pkg(artifact, "2.0.0", "1.1.1", state)
+                        apple.verify_pkg(artifact, "2.0.1", "1.1.1", state)
                     verify.assert_not_called()
                 self.assertFalse(expanded.parent.exists())
                 self.assertEqual(run.call_args_list[0],
@@ -332,7 +332,7 @@ class PackageTests(unittest.TestCase):
                 return mac_tool_output(*args, **kwargs)
             run.side_effect = result
             with self.assertRaisesRegex(ValueError, "versions must match"):
-                apple.verify_pkg(Path(temporary) / "release.pkg", "2.0.0", "1.1.1", Path(temporary))
+                apple.verify_pkg(Path(temporary) / "release.pkg", "2.0.1", "1.1.1", Path(temporary))
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
 
@@ -470,7 +470,7 @@ class ReleaseFlowTests(unittest.TestCase):
             name = "APPLE_WIDGET_PROFILE_BASE64" if widget else "APPLE_APP_PROFILE_BASE64"
             self.environment[name] = apple.base64.b64encode(plistlib.dumps(profile)).decode()
         with mock.patch.dict(os.environ, self.environment, clear=True), mock.patch("sys.stdout", new_callable=io.StringIO):
-            apple.release(mock.Mock(target=self.target, upload=upload), "2.0.0", "1.1.1")
+            apple.release(mock.Mock(target=self.target, upload=upload), "2.0.1", "1.1.1")
 
     def check_metadata(self, upload=False):
         direct = self.target == "macos-direct"
@@ -479,7 +479,7 @@ class ReleaseFlowTests(unittest.TestCase):
         data = json.loads((output / "release.json").read_text())
         artifact = output / data["artifact"]
         self.assertEqual(data, {
-            "commit": "fixture-commit", "target": self.target, "version": "2.0.0", "build": "1.1.1",
+            "commit": "fixture-commit", "target": self.target, "version": "2.0.1", "build": "1.1.1",
             "artifact": artifact.name, "platform": platform, "native_macos": platform == "macos",
             "uploaded_to_testflight": upload and not direct, "notarized": direct,
             "app_notarized": direct, "notarization_submission_ids": {"app": SUBMISSION, "dmg": SUBMISSION} if direct else {},
@@ -590,7 +590,7 @@ class ReleaseFlowTests(unittest.TestCase):
         with mock.patch.dict(os.environ, self.environment, clear=True), \
              mock.patch.object(apple.sys, "platform", "darwin"), mock.patch.object(apple.os, "umask"), \
              mock.patch.object(apple.sys, "argv", ["apple_release.py", "unsigned", "--target", "macos-testflight",
-                                                "--version", "2.0.0", "--build", "101"]):
+                                                "--version", "2.0.1", "--build", "101"]):
             apple.main()
         command = self.run.call_args_list[0].args
         for setting in (*apple.MACOS_BUILD_SETTINGS, "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"):

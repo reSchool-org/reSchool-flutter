@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,14 +26,15 @@ import 'services/deep_link_handler.dart';
 import 'services/windows_protocol_service.dart';
 import 'services/linux_protocol_service.dart';
 import 'services/tls_pin_store.dart';
+import 'services/app_link_inbox.dart';
+
+final _appLinks = AppLinkInbox();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Подключаем GTK-канал до асинхронной инициализации, чтобы сохранить ссылку запуска.
-  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
-    unawaited(AppLinks().getInitialLink());
-  }
+  // сохраняем ссылки, чтобы не потерять переходы во время запуска
+  _appLinks.start(AppLinks().uriLinkStream);
 
   try {
     await appSecureStorage.delete(key: 'fcm_token');
@@ -81,8 +80,6 @@ class ReSchoolApp extends StatefulWidget {
 }
 
 class _ReSchoolAppState extends State<ReSchoolApp> {
-  StreamSubscription<Uri>? _linkSub;
-
   @override
   void initState() {
     super.initState();
@@ -90,23 +87,16 @@ class _ReSchoolAppState extends State<ReSchoolApp> {
   }
 
   void _initDeepLinks() {
-    final appLinks = AppLinks();
-
-    // Поток app_links включает ссылку запуска и последующие переходы.
-    _linkSub = appLinks.uriLinkStream.listen((uri) {
-      if (navigatorKey.currentState == null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          DeepLinkHandler.handle(uri, navigatorKey);
-        });
-      } else {
-        DeepLinkHandler.handle(uri, navigatorKey);
-      }
+    _appLinks.start(AppLinks().uriLinkStream);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _appLinks.attach((uri) => DeepLinkHandler.handle(uri, navigatorKey));
     });
   }
 
   @override
   void dispose() {
-    _linkSub?.cancel();
+    _appLinks.detach();
     super.dispose();
   }
 

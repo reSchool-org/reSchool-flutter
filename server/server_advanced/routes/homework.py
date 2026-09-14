@@ -39,7 +39,7 @@ _OPEN_PAGE_JS = (Path(__file__).resolve().parents[1] / 'assets' / 'open.js').rea
 @bp.route('/open', methods=['GET'])
 def open_in_app():
     """страница https открывает ссылку reschool:// по кнопке телеграма"""
-    from urllib.parse import quote, unquote
+    from urllib.parse import quote, unquote, urlencode
 
     link_type = request.args.get('type', 'diary')
 
@@ -63,9 +63,18 @@ def open_in_app():
         btn_label = "Открыть reSchool"
         return _render_open_page(deep_link, card_html, btn_label)
 
+    if link_type in ('message', 'chat'):
+        params = {key: request.args.get(key, '') for key in ('threadId', 'msgNum', 'isGroup')}
+        deep_link = 'reschool://message?' + urlencode(params)
+        card_html = '<div class="info-card"><div class="info-card-text"><span class="info-subject">Сообщение</span><span class="info-date">Открыть беседу в reSchool</span></div></div>'
+        return _render_open_page(deep_link, card_html, 'Открыть сообщение')
+
     date = request.args.get('date', '')
     subject = request.args.get('subject', '')
-    deep_link = f"reschool://diary?date={quote(date)}&subject={quote(subject)}"
+    target = 'grade' if link_type == 'grade' else 'diary'
+    deep_link = f"reschool://{target}?date={quote(date)}&subject={quote(subject)}"
+    if request.args.get('lessonId'):
+        deep_link += '&lessonId=' + quote(request.args['lessonId'], safe='')
     display_subject = unquote(subject) or 'Предмет'
     display_date = date or ''
 
@@ -633,18 +642,22 @@ def _notify_group_about_custom_homework(
     base_url,
     event_type="created",
     analysis_data=None,
+    homework_id=None,
+    analysis_id=None,
 ):
     """отправляем сообщение группы в топик выбранного предмета"""
     normalized_grade = _normalize_grade_class(grade_class)
     if not normalized_grade:
-        return
+        log(f"[Homework] Group notify failed: homework_id={homework_id}, reason=missing_class")
+        return False
 
     files = files or []
     base_url = str(base_url or "").rstrip("/")
 
     conn = get_db_connection()
     if not conn:
-        return
+        log(f"[Homework] Group notify failed: homework_id={homework_id}, reason=no_database")
+        return False
 
     try:
         cursor = conn.cursor(dictionary=True)
@@ -663,18 +676,19 @@ def _notify_group_about_custom_homework(
         conn.close()
     except Exception as e:
         log(f"[Homework] Group notify DB error: {e}")
-        return
+        return False
     finally:
         conn.close()
 
     if not registrations:
-        return
+        log(f"[Homework] Group notify skipped: homework_id={homework_id}, reason=no_configured_group")
+        return True
 
     try:
         from ..telegram_bot import send_telegram_message
     except Exception as e:
         log(f"[Homework] Telegram import error: {e}")
-        return
+        return False
 
     sent = 0
     skipped = 0
@@ -692,7 +706,6 @@ def _notify_group_about_custom_homework(
         # пустой topic_id значит, что топик не задан, пишем в общий чат группы
 
         attachments = []
-        registration_id = str(reg.get('id') or '').strip()
         for file_info in files:
             if not isinstance(file_info, dict):
                 continue
@@ -708,13 +721,10 @@ def _notify_group_about_custom_homework(
             }
             if file_path and os.path.exists(file_path):
                 attachment["path"] = file_path
-            elif file_id and registration_id and base_url:
-                try:
-                    attachment["url"] = f"{base_url}/custom-homework/file/{int(file_id)}?token={registration_id}"
-                except (TypeError, ValueError):
-                    continue
             else:
-                continue
+                # телеграм не сможет скачать вложение по ссылке на закрытое апи
+                # карточка уйдёт с пометкой о недоступном вложении и частичной доставке
+                log(f"[Homework] Attachment unavailable: homework_id={homework_id}, file_id={file_id}")
             attachments.append(attachment)
 
         title_prefix = "📝 Новое кастомное ДЗ" if event_type == "created" else "✏️ Обновлено кастомное ДЗ"
@@ -732,8 +742,11 @@ def _notify_group_about_custom_homework(
             deep_link_url=open_url,
             notification_type='homework',
             notification_data={'subject': subject_title, 'date': lesson_date_text,
-                               'author': author_name, 'attachmentCount': len(files)},
+                               'author': author_name, 'attachmentCount': len(files),
+                               'id': homework_id, 'analysisId': analysis_id},
             analysis_data=analysis_data,
+            require_complete=True,
+            durable=True,
         )
         if ok:
             sent += 1
@@ -742,8 +755,10 @@ def _notify_group_about_custom_homework(
 
     log(
         f"[Homework] Group custom-homework notify ({event_type}): "
-        f"sent={sent}, skipped={skipped}, class='{normalized_grade}', subject='{subject_title}', files={len(files)}"
+        f"homework_id={homework_id}, analysis_id={analysis_id}, "
+        f"queued={sent}, failed={skipped}, class='{normalized_grade}', subject='{subject_title}', files={len(files)}"
     )
+    return skipped == 0
 
 
 def _get_registration_id_for_token(cursor, token):
@@ -1000,10 +1015,18 @@ def _reanalyze_custom_homework(homework_id, grade_class, subject, lesson_date, t
             UPDATE homework_analysis SET status = 'rejected', reject_reason = 'edited'
             WHERE source = 'custom' AND source_id = %s AND status <> 'rejected'
         """, (str(homework_id),))
+        cursor.execute("""
+            UPDATE pending_notifications SET status = 'dropped'
+            WHERE status IN ('pending', 'failed') AND analysis_id IN (
+                SELECT id FROM homework_analysis WHERE source = 'custom' AND source_id = %s
+            )
+        """, (str(homework_id),))
         conn.commit()
         cursor.close()
-        analysis.enqueue(conn, grade_class, subject, date_iso, text, 'custom', homework_id)
+        analysis_id, _ = analysis.enqueue(
+            conn, grade_class, subject, date_iso, text, 'custom', homework_id, force_new=True)
         _request_summary_rebuild(conn, grade_class, subject, date_iso)
+        return analysis_id
     except Exception as e:
         log(f"[Homework] Перезапуск разбора после правки не удался: {e}")
     finally:
@@ -1035,14 +1058,30 @@ def _resolve_grade_class_for_request():
 def _send_custom_homework_notifications(homework_id, grade_class, subject, lesson_date, text,
                                         author_full_name, files, base_url,
                                         classmate_id, exclude_reg_id, extra_lines=None,
-                                        analysis_id=None, attachments=None, analysis_data=None):
+                                        analysis_id=None, attachments=None, analysis_data=None,
+                                        event_type='created'):
     """разослать своё дз: в группу телеграма и пушем одноклассникам"""
+    # очередь хранит только публичные метаданные, поэтому путь берём из базы
+    # это нужно и для записей, которые уже были в очереди
+    files = files or []
+    if files:
+        conn = get_db_connection()
+        if not conn:
+            log(f"[Homework] Attachment lookup failed: homework_id={homework_id}, reason=no_database")
+            return False
+        try:
+            cursor = conn.cursor()
+            stored = {str(f['id']): f for f in get_homework_files(cursor, homework_id, include_storage_path=True)}
+            files = [stored.get(str(f.get('id')), f) for f in files]
+            cursor.close()
+        finally:
+            conn.close()
     # вырезки из учебника приводим к тому же виду, что и обычные вложения
     crops = [{"fileName": a.get("name") or "Задание", "storagePath": a.get("path"),
               "isImage": True}
              for a in (attachments or []) if a.get("path")]
     try:
-        _notify_group_about_custom_homework(
+        group_result = _notify_group_about_custom_homework(
             grade_class=grade_class,
             subject=subject,
             lesson_date=lesson_date,
@@ -1050,20 +1089,24 @@ def _send_custom_homework_notifications(homework_id, grade_class, subject, lesso
             author_full_name=author_full_name,
             files=(files or []) + crops,
             base_url=base_url,
-            event_type="created",
+            event_type=event_type,
             analysis_data=analysis_data,
+            homework_id=homework_id,
+            analysis_id=analysis_id,
         )
     except Exception as notify_error:
         log(f"[Homework] Group custom-homework notify error: {notify_error}")
+        group_result = False
     try:
         date_iso = lesson_date.isoformat() if hasattr(lesson_date, 'isoformat') else str(lesson_date)
         body = "\n".join([(text or '')[:120]] + list(extra_lines or []))
         data = {'type': 'homework', 'id': str(homework_id), 'date': date_iso, 'subject': subject}
         if analysis_id:
             data['analysisId'] = str(analysis_id)
-        _notify_classmates(
+        history_result = _notify_classmates(
             grade_class,
-            f"📝 ДЗ от {author_full_name}: {subject}",
+            (f"✏️ ДЗ изменено от {author_full_name}: {subject}" if event_type == 'updated'
+             else f"📝 ДЗ от {author_full_name}: {subject}"),
             body,
             data,
             exclude_classmate_id=classmate_id,
@@ -1071,23 +1114,36 @@ def _send_custom_homework_notifications(homework_id, grade_class, subject, lesso
         )
     except Exception as notify_error:
         log(f"[Homework] Classmate history notify error: {notify_error}")
+        history_result = False
+    return group_result is not False and history_result is not False
 
 
 def _dispatch_custom_homework(homework_id, grade_class, subject, lesson_date, text,
-                              author_full_name, files, base_url, classmate_id, exclude_reg_id):
+                              author_full_name, files, base_url, classmate_id, exclude_reg_id,
+                              event_type='created'):
     """задание от одноклассника отправляем после проверки на повторы и разбора"""
     date_iso = lesson_date.isoformat() if hasattr(lesson_date, 'isoformat') else str(lesson_date)
 
     if analysis.is_enabled() and grade_class and (text or '').strip():
+        updated_analysis_id = None
+        if event_type == 'updated':
+            updated_analysis_id = _reanalyze_custom_homework(
+                homework_id, grade_class, subject, lesson_date, text)
+            if not updated_analysis_id:
+                return  # непроверенную правку нельзя отправлять в группу
         conn = get_db_connection()
         if conn:
             try:
-                analysis_id, _ = analysis.enqueue(
-                    conn, grade_class, subject, date_iso, text, 'custom', homework_id)
+                if event_type == 'updated':
+                    analysis_id = updated_analysis_id
+                else:
+                    analysis_id, _ = analysis.enqueue(
+                        conn, grade_class, subject, date_iso, text, 'custom', homework_id)
                 if analysis_id:
                     analysis.add_pending(
                         conn, analysis_id, 'class',
-                        f"📝 ДЗ от {author_full_name}: {subject}", text or '',
+                        (f"✏️ ДЗ изменено от {author_full_name}: {subject}" if event_type == 'updated'
+                         else f"📝 ДЗ от {author_full_name}: {subject}"), text or '',
                         {'type': 'homework', 'id': str(homework_id),
                          'date': date_iso, 'subject': subject},
                         payload={
@@ -1096,19 +1152,23 @@ def _dispatch_custom_homework(homework_id, grade_class, subject, lesson_date, te
                             'lesson_date': date_iso,
                             'files': _public_files_payload(files or []),
                             'base_url': base_url,
+                            'event_type': event_type,
                         },
                         grade_class=grade_class,
                         exclude_classmate_id=classmate_id,
                         exclude_registration_id=exclude_reg_id)
+                    log(f"[Homework] Notification queued: homework_id={homework_id}, analysis_id={analysis_id}, files={len(files or [])}")
                     return
             except Exception as e:
                 log(f"[Homework] Не удалось поставить домашнее задание на проверку: {e}")
             finally:
                 conn.close()
+        if event_type == 'updated':
+            return
 
     _send_custom_homework_notifications(
         homework_id, grade_class, subject, lesson_date, text, author_full_name,
-        files, base_url, classmate_id, exclude_reg_id)
+        files, base_url, classmate_id, exclude_reg_id, event_type=event_type)
 
 
 @bp.route('/custom-homework/create', methods=['POST'])
@@ -1514,39 +1574,19 @@ def update_custom_homework():
         invalidate_homework(hw_grade_class)
 
         log(f"Custom homework updated: {homework_id}")
-        _reanalyze_custom_homework(
+        _dispatch_custom_homework(
             homework_id=homework_id,
             grade_class=hw_grade_class,
             subject=hw[1],
             lesson_date=hw[2],
             text=hw[3],
+            author_full_name=hw[4],
+            files=all_files,
+            base_url=get_public_base_url() or request.url_root,
+            classmate_id=classmate_id,
+            exclude_reg_id=exclude_reg_id,
+            event_type='updated',
         )
-        try:
-            _notify_group_about_custom_homework(
-                grade_class=hw_grade_class,
-                subject=hw[1],
-                lesson_date=hw[2].isoformat() if hw[2] else None,
-                text=hw[3],
-                author_full_name=hw[4],
-                files=all_files,
-                base_url=get_public_base_url() or request.url_root,
-                event_type="updated",
-            )
-        except Exception as notify_error:
-            log(f"[Homework] Group custom-homework update notify error: {notify_error}")
-        try:
-            hw_preview = (hw[3] or '')[:120]
-            hw_date_iso = hw[2].isoformat() if hw[2] and hasattr(hw[2], 'isoformat') else str(hw[2] or '')
-            _notify_classmates(
-                hw_grade_class,
-                f"✏️ ДЗ изменено от {hw[4]}: {hw[1]}",
-                hw_preview,
-                {'type': 'homework', 'id': str(homework_id), 'date': hw_date_iso, 'subject': hw[1]},
-                exclude_classmate_id=classmate_id,
-                exclude_registration_id=exclude_reg_id,
-            )
-        except Exception as notify_error:
-            log(f"[Homework] Classmate history update notify error: {notify_error}")
 
         return jsonify({
             "success": True,

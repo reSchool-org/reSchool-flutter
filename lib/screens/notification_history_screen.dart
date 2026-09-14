@@ -1,14 +1,15 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../l10n/app_localizations.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/responsive_layout.dart';
 import '../utils/app_font.dart';
 import '../services/diary_navigation_service.dart';
-import 'chat_detail_screen.dart';
 import '../widgets/app_card.dart';
 import '../services/reschool_http.dart';
 
@@ -290,32 +291,31 @@ class _NotificationHistoryScreenState extends State<NotificationHistoryScreen> {
 
     switch (notification.type) {
       case 'message':
-        final threadId =
-            data != null ? int.tryParse(data['id']?.toString() ?? '') : null;
+        final threadId = data != null
+            ? int.tryParse(data['id']?.toString() ?? '')
+            : null;
         if (threadId == null) return;
-        Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => ChatDetailScreen(
+        DiaryNavigationService.instance.openChat(
+          ChatNavigationRequest(
             threadId: threadId,
             title: notification.title.replaceAll('💬 ', '').split(':').first,
-            isGroup: false,
+            isGroup: data?['isGroup'] == true || data?['isGroup'] == 'true',
+            messageNumber: int.tryParse(data?['msgNum']?.toString() ?? ''),
           ),
-        ));
+        );
         break;
 
       case 'homework':
-        final dateStr = data?['date'] as String?;
-        final subject = data?['subject'] as String?;
-        final date = dateStr != null ? DateTime.tryParse(dateStr) : null;
-        // уводим на вкладку дневника с датой и предметом, экран закрываем, чтобы стал виден HomeScreen
-        DiaryNavigationService.instance
-            .switchTab(0, date: date, subject: subject);
-        Navigator.of(context).pop();
-        break;
-
       case 'grade':
-        // уводим на вкладку оценок, экран так же закрываем
-        DiaryNavigationService.instance.switchTab(1);
-        Navigator.of(context).pop();
+        final dateStr = data?['date']?.toString();
+        final subject = data?['subject']?.toString();
+        final date = dateStr != null ? DateTime.tryParse(dateStr) : null;
+        DiaryNavigationService.instance.switchTab(
+          notification.type == 'grade' && date == null ? 1 : 0,
+          date: date,
+          subject: subject,
+          lessonId: int.tryParse(data?['lessonId']?.toString() ?? ''),
+        );
         break;
 
       default:
