@@ -134,6 +134,50 @@ class AIProviderTests(unittest.TestCase):
                     c.generate([{'text': 'hello'}])
                 self.assertEqual(send.call_count, 2 if code in c.RETRY_CODES else 1)
 
+    def test_vertex_replaces_rejected_cached_token_and_repeats_same_request(self):
+        c = client('google', GEMINI_VERTEX_PROJECT='project')
+        c._token.update(value='expired-token', expires=c.time.time() + 1800)
+        failure = urllib.error.HTTPError('https://vertex', 401, 'expired', {}, io.BytesIO(b'expired'))
+        self.addCleanup(failure.close)
+        reply = Mock(read=Mock(return_value=json.dumps({
+            'candidates': [{'content': {'parts': [{'text': 'ok'}]}, 'finishReason': 'STOP'}],
+        }).encode()))
+        with patch.object(c, '_print_access_token', return_value=('fresh-token', '')) as refresh, \
+                patch.object(c.urllib.request, 'urlopen', side_effect=[failure, reply]) as send:
+            self.assertEqual(c.generate([{'text': 'Read page'}])[0], 'ok')
+        refresh.assert_called_once()
+        requests = [call.args[0] for call in send.call_args_list]
+        self.assertEqual([r.get_header('Authorization') for r in requests],
+                         ['Bearer expired-token', 'Bearer fresh-token'])
+        self.assertEqual(requests[0].data, requests[1].data)
+
+    def test_vertex_repeated_401_stops_after_one_auth_retry(self):
+        c = client('google', GEMINI_VERTEX_PROJECT='project')
+        failure = urllib.error.HTTPError('https://vertex', 401, 'invalid', {}, io.BytesIO(b'invalid'))
+        self.addCleanup(failure.close)
+        with patch.object(c, '_print_access_token', return_value=('invalid-token', '')), \
+                patch.object(c.urllib.request, 'urlopen', side_effect=failure) as send:
+            with self.assertRaisesRegex(c.GeminiError, 'HTTP 401'):
+                c.generate([{'text': 'Read page'}])
+        self.assertEqual(send.call_count, 2)
+
+    def test_rejected_old_request_does_not_clear_new_token(self):
+        c = client('google', GEMINI_VERTEX_PROJECT='project')
+        c._token.update(value='fresh-token', expires=12345)
+        c._invalidate_access_token('Bearer old-token')
+        self.assertEqual(c._token, {'value': 'fresh-token', 'expires': 12345})
+
+    def test_studio_401_does_not_refresh_vertex_auth(self):
+        c = client('google')
+        failure = urllib.error.HTTPError('https://studio', 401, 'invalid', {}, io.BytesIO(b'invalid'))
+        self.addCleanup(failure.close)
+        with patch.object(c, '_print_access_token') as refresh, \
+                patch.object(c.urllib.request, 'urlopen', side_effect=failure) as send:
+            with self.assertRaises(c.GeminiError):
+                c.generate([{'text': 'Read page'}])
+        refresh.assert_not_called()
+        self.assertEqual(send.call_count, 1)
+
     def test_http_200_provider_error_retries_and_recovers(self):
         c = client()
         failure = response(error={'code': 503, 'message': 'busy'})

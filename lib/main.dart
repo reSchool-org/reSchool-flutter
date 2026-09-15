@@ -126,9 +126,12 @@ class _ReSchoolAppState extends State<ReSchoolApp> {
             );
           }
           return MaterialApp(
-            builder: (context, child) => AppFontScope(
-              fontKey: settingsProvider.fontFamily,
-              child: child!,
+            // единый размер текста на всех экранах, включая маршруты и диалоги
+            builder: (context, child) => MediaQuery.withNoTextScaling(
+              child: AppFontScope(
+                fontKey: settingsProvider.fontFamily,
+                child: child!,
+              ),
             ),
             navigatorKey: navigatorKey,
             title: 'reSchool',

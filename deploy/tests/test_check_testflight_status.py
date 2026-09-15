@@ -28,7 +28,7 @@ class TestFlightStatusTests(unittest.TestCase):
             ("preReleaseVersions", "version-1"): {"attributes": self.version},
             ("buildBetaDetails", "detail-1"): {"attributes": self.detail},
         }
-        self.group = {"attributes": {
+        self.group = {"id": "group-1", "attributes": {
             "isInternalGroup": False, "publicLinkEnabled": True,
             "publicLink": status.DEFAULT_PUBLIC_URL,
         }}
@@ -39,7 +39,7 @@ class TestFlightStatusTests(unittest.TestCase):
         client = Mock()
         client.listing.side_effect = [
             ([{"id": "app-1", "attributes": {"bundleId": status.BUNDLE}}], {}),
-            ([self.build], self.included), ([self.group], {}),
+            ([self.build], self.included), ([self.group], {}), ([self.build], {}),
         ]
         return client
 
@@ -69,13 +69,33 @@ class TestFlightStatusTests(unittest.TestCase):
     def test_public_link_must_belong_to_external_group_containing_build(self):
         client = self.client()
         self.assertEqual(status.find_external_build(client, "2.0.1", status.DEFAULT_PUBLIC_URL), self.build)
-        query = client.listing.call_args.kwargs
-        self.assertEqual(query["filter[builds]"], "build-1")
-        self.assertEqual(query["filter[app]"], "app-1")
+        self.assertEqual(client.listing.call_args_list[2].kwargs,
+                         {"filter[app]": "app-1", "limit": 200})
+        self.assertEqual(client.listing.call_args.args, ("/v1/betaGroups/group-1/builds",))
         for change in ({"isInternalGroup": True}, {"publicLinkEnabled": False},
                        {"publicLink": "https://testflight.apple.com/join/Other"}):
             with self.subTest(change=change), patch.dict(self.group["attributes"], change):
                 self.assertIsNone(status.find_external_build(self.client(), "2.0.1", status.DEFAULT_PUBLIC_URL))
+
+    def test_matching_public_group_must_actually_contain_the_ready_build(self):
+        client = self.client()
+        client.listing.side_effect = [
+            ([{"id": "app-1", "attributes": {"bundleId": status.BUNDLE}}], {}),
+            ([self.build], self.included), ([self.group], {}),
+            ([{"id": "another-build"}], {}),
+        ]
+        self.assertIsNone(status.find_external_build(client, "2.0.1", status.DEFAULT_PUBLIC_URL))
+
+    def test_group_failure_identifies_the_request_without_publishing(self):
+        client = self.client()
+        client.listing.side_effect = [
+            ([{"id": "app-1", "attributes": {"bundleId": status.BUNDLE}}], {}),
+            ([self.build], self.included), ([self.group], {}), status.SafeError("HTTP_400"),
+        ]
+        with patch.object(status, "command", return_value=json.dumps(self.release).encode()) as run:
+            with self.assertRaisesRegex(status.SafeError, "^BETA_GROUP_BUILDS: HTTP_400$"):
+                status.publish_if_ready("owner/repo", status.DEFAULT_PUBLIC_URL, lambda: client)
+        self.assertEqual(run.call_count, 1)
 
     def test_publishes_exact_app_txt_without_overwrite(self):
         def command(*args, **kwargs):

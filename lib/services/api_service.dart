@@ -20,6 +20,7 @@ import '../config/app_config.dart';
 import '../models/profile_models.dart';
 import '../models/chat_models.dart';
 import '../models/account.dart';
+import '../models/student_context.dart';
 import '../models/login_failure.dart';
 import '../models/lpart_models.dart';
 import '../models/school_directory.dart';
@@ -70,6 +71,11 @@ class ApiService {
 
   int? userId;
   int? currentPrsId;
+  StudentContext? _studentContext;
+  int? get studentPrsId =>
+      _studentContext == null ? currentPrsId : _studentContext!.prsId;
+  int? get studentUserId =>
+      _studentContext == null ? userId : _studentContext!.userId;
   int? currentYearId;
   Profile? userProfile;
   String? _deviceModel;
@@ -194,7 +200,8 @@ class ApiService {
     if (saved != null) {
       _androidVersion = saved;
     } else {
-      _androidVersion = (9 + Random().nextInt(8)).toString(); // длина от 9 до 16 символов
+      _androidVersion = (9 + Random().nextInt(8))
+          .toString(); // длина от 9 до 16 символов
       await prefs.setString('saved_android_version', _androidVersion!);
     }
   }
@@ -296,6 +303,7 @@ class ApiService {
     _isDemo = _isDemoCredentials(_account!.username, _account!.password);
     userId = null;
     currentPrsId = null;
+    _studentContext = null;
     currentYearId = null;
     userProfile = null;
 
@@ -343,6 +351,7 @@ class ApiService {
     _isDemo = false;
     userId = null;
     currentPrsId = null;
+    _studentContext = null;
     currentYearId = null;
     userProfile = null;
     _account = null;
@@ -631,6 +640,7 @@ class ApiService {
       isAuthenticated = false;
       userId = null;
       currentPrsId = null;
+      _studentContext = null;
       currentYearId = null;
       userProfile = null;
       unawaited(
@@ -716,6 +726,7 @@ class ApiService {
               _updateCookies(response, updateAccount: false);
               userId = data['userId'];
               currentPrsId = shared.prsId;
+              _studentContext = StudentContext.fromState(data);
               userProfile = profile;
               _isDemo = false;
               isAuthenticated = true;
@@ -944,6 +955,8 @@ class ApiService {
       try {
         final data = jsonDecode(response.body);
         userId = data['userId'];
+        _studentContext = StudentContext.fromState(data);
+        currentYearId = null;
         if (data['user'] != null) {
           currentPrsId = data['user']['prsId'];
         }
@@ -972,16 +985,16 @@ class ApiService {
       final end = DateTime.fromMillisecondsSinceEpoch(d2.toInt());
       return _demoData.prsDiaryJson(start, end);
     }
-    if (currentPrsId == null) {
+    if (studentPrsId == null) {
       await _fetchState();
     }
 
-    if (currentPrsId == null) {
+    if (studentPrsId == null) {
       throw Exception('User PrsID not found');
     }
 
     final url =
-        "$_baseURL/student/getPrsDiary?prsId=$currentPrsId&d1=${d1.toInt()}&d2=${d2.toInt()}";
+        "$_baseURL/student/getPrsDiary?prsId=$studentPrsId&d1=${d1.toInt()}&d2=${d2.toInt()}";
     final headers = _getHeaders();
 
     final response = await _request("GET", url, headers: headers);
@@ -1066,8 +1079,10 @@ class ApiService {
           _demoData.fileBytes(uri) ??
           utf8.encode("Демонстрационный файл reSchool");
     } else if (kIsWeb) {
-      final response = await _request('GET', url)
-          .timeout(const Duration(seconds: 60));
+      final response = await _request(
+        'GET',
+        url,
+      ).timeout(const Duration(seconds: 60));
       if (response.statusCode != 200) {
         throw Exception('Failed to download file: ${response.statusCode}');
       }
@@ -1697,7 +1712,8 @@ class ApiService {
     if (_isDemo) {
       return _demoData.classByUserJson();
     }
-    if (userId == null) await _fetchState();
+    if (studentUserId == null) await _fetchState();
+    final userId = studentUserId;
 
     if (userId == null) throw Exception('User ID not found');
 
@@ -1782,7 +1798,8 @@ class ApiService {
     if (_isDemo) {
       return _demoData.diaryUnitsJson();
     }
-    if (userId == null) await _fetchState();
+    if (studentUserId == null) await _fetchState();
+    final userId = studentUserId;
 
     if (userId == null) throw Exception('User ID not found');
 
@@ -1803,7 +1820,8 @@ class ApiService {
     if (_isDemo) {
       return _demoData.diaryPeriodJson();
     }
-    if (userId == null) await _fetchState();
+    if (studentUserId == null) await _fetchState();
+    final userId = studentUserId;
 
     if (userId == null) throw Exception('User ID not found');
 
@@ -1823,10 +1841,10 @@ class ApiService {
   Future<int> getCurrentYearId() async {
     if (currentYearId != null) return currentYearId!;
 
-    if (currentPrsId == null) await _fetchState();
-    if (currentPrsId == null) throw Exception('User PrsID not found');
+    if (studentPrsId == null) await _fetchState();
+    if (studentPrsId == null) throw Exception('User PrsID not found');
 
-    final profileData = await getProfileNew(currentPrsId!);
+    final profileData = await getProfileNew(studentPrsId!);
     final pupils = profileData['pupil'] as List<dynamic>?;
     if (pupils == null || pupils.isEmpty) {
       throw Exception('No pupil data found in profile');
@@ -1945,11 +1963,11 @@ class ApiService {
     int endDate,
     int yearId,
   ) async {
-    if (currentPrsId == null) await _fetchState();
-    if (currentPrsId == null) throw Exception('User PrsID not found');
+    if (studentPrsId == null) await _fetchState();
+    if (studentPrsId == null) throw Exception('User PrsID not found');
 
     final url =
-        "$_baseURL/student/getLPartListPupil?begDate=$begDate&endDate=$endDate&isOdod=0&prsId=$currentPrsId&yearId=$yearId";
+        "$_baseURL/student/getLPartListPupil?begDate=$begDate&endDate=$endDate&isOdod=0&prsId=$studentPrsId&yearId=$yearId";
     final headers = _getHeaders();
     headers["Content-Type"] = "application/json;charset=UTF-8";
 
@@ -1965,11 +1983,11 @@ class ApiService {
   }
 
   Future<LPartDetail> getLPartPupil(int partId) async {
-    if (currentPrsId == null) await _fetchState();
-    if (currentPrsId == null) throw Exception('User PrsID not found');
+    if (studentPrsId == null) await _fetchState();
+    if (studentPrsId == null) throw Exception('User PrsID not found');
 
     final url =
-        "$_baseURL/student/getLPartPupil?partId=$partId&prsId=$currentPrsId";
+        "$_baseURL/student/getLPartPupil?partId=$partId&prsId=$studentPrsId";
     final headers = _getHeaders();
 
     final response = await _request("GET", url, headers: headers);

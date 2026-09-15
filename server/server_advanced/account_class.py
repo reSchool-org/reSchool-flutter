@@ -6,6 +6,7 @@ import requests
 
 from .config import BASE_URL, USER_AGENT
 from .logging_utils import log
+from .student_context import student_context
 
 
 def _date(value):
@@ -64,7 +65,12 @@ def resolve_account_class(cookies, prs_id):
     user = state.get('user') if isinstance(state, dict) else None
     if not isinstance(user, dict) or type(user.get('prsId')) is not int or user['prsId'] != prs_id:
         return None
-    user_id = state.get('userId') or user.get('userId')
+    try:
+        student = student_context(state)
+    except ValueError:
+        return None
+    user_id = student['userId']
+    prs_id = student['prsId']
     if type(user_id) is int and user_id > 0:
         grade = pick_account_class(get('/usr/getClassByUser', {'userId': user_id}))
         if grade:

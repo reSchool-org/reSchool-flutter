@@ -37,6 +37,7 @@ from ..notification_delivery import (
 from .. import analysis
 from ..school_dates import school_date, school_datetime
 from .. import chat_notifications
+from ..student_context import student_context
 from ..telegram_bot import start_telegram_bot, stop_telegram_bot, restart_all_telegram_bots, send_telegram_message, send_group_connected_notice, request_topic_detect, get_and_clear_detected_topic, create_group_activation_code
 from ..encryption import init_encryption, encrypt_password, decrypt_password
 from ..keep_alive import update_session, get_session, mark_account_session_invalid
@@ -502,7 +503,11 @@ def _merge_lpart(homework_list, lpart_items):
         return day, ' '.join(subject.split()).casefold(), normalized
 
     existing_keys = {}
+    existing_parts = {}
     for hw in homework_list:
+        part_key = _normalize_key(hw.get('partId'))
+        if part_key is not None:
+            existing_parts.setdefault(part_key, []).append(hw)
         date_ms = hw.get('date')
         if not date_ms:
             continue
@@ -522,10 +527,19 @@ def _merge_lpart(homework_list, lpart_items):
         subject = lpart.get('unitName', 'Предмет') or 'Предмет'
         dedup_key = content_key(pass_dt, subject, preview)
 
+        # превью бывает обрезано, поэтому связь с частью урока надёжнее текста
+        part_key = _normalize_key(lpart.get('partId'))
+        matching_parts = existing_parts.get(part_key, [])
+        if matching_parts:
+            for existing in matching_parts:
+                existing['hasFiles'] = bool(existing.get('hasFiles') or attach_cnt)
+            continue
+
         if dedup_key in existing_keys and dedup_key[2]:
             existing = existing_keys[dedup_key]
             if lpart.get('partId'):
                 existing['partId'] = lpart['partId']
+                existing_parts.setdefault(part_key, []).append(existing)
             existing['hasFiles'] = bool(existing.get('hasFiles') or attach_cnt)
             continue
 
@@ -542,6 +556,8 @@ def _merge_lpart(homework_list, lpart_items):
             'attachments': [],
         })
         existing_keys[dedup_key] = homework_list[-1]
+        if part_key is not None:
+            existing_parts.setdefault(part_key, []).append(homework_list[-1])
         added += 1
 
     if added:
@@ -577,6 +593,9 @@ def fetch_data_with_session(cookies, username):
         if not prs_id:
             return None, None, None, None, False, None
 
+        owner_prs_id = prs_id
+        prs_id = student_context(state)['prsId']
+
         profile = state.get('profile', {}) or {}
         first_name = profile.get('firstName', username) if isinstance(profile, dict) else username
 
@@ -587,9 +606,12 @@ def fetch_data_with_session(cookies, username):
         diary_url = f"{BASE_URL}/student/getPrsDiary?prsId={prs_id}&d1={d1}&d2={d2}"
         diary_resp = requests.get(diary_url, headers=headers, cookies=cookies, timeout=30)
 
-        if diary_resp.status_code == 401:
-            log(f"[Notify] Session expired for {username} (diary 401)")
+        if diary_resp.status_code in (401, 403):
+            log(f"[Notify] Session expired for {username} (diary {diary_resp.status_code})")
             return None, None, None, None, True, None
+
+        if diary_resp.status_code != 200 or not isinstance(diary_resp.json(), dict):
+            return None, None, None, None, False, None
 
         homework_list = []
         grades_list = []
@@ -639,6 +661,7 @@ def fetch_data_with_session(cookies, username):
                             if has_content and variant_id:
                                 homework_list.append({
                                     'id': variant_id,
+                                    'partId': part.get('id'),
                                     'lessonId': lesson_id,
                                     'subject': subject_name,
                                     'subjectId': lesson_subject_id_map.get(lesson_key),
@@ -685,12 +708,15 @@ def fetch_data_with_session(cookies, username):
             lpart_items = _fetch_lpart(cookies, prs_id, year_id, d1, d2, headers)
             _merge_lpart(homework_list, lpart_items)
 
+        for homework in homework_list:
+            homework['studentPrsId'] = prs_id
+
         notifications_list, session_expired = _fetch_chat_threads(cookies, headers)
         if session_expired:
-            return None, None, None, None, True, prs_id
+            return None, None, None, None, True, owner_prs_id
 
         log(f"[Notify] Session fetch OK for {username}: HW={len(homework_list)}, Grades={len(grades_list)}, Msgs={len(notifications_list or [])}")
-        return homework_list, grades_list, notifications_list, first_name, False, prs_id
+        return homework_list, grades_list, notifications_list, first_name, False, owner_prs_id
 
     except Exception as e:
         log(f"[Notify] fetch_data_with_session error for {username}: {e}")
@@ -722,7 +748,7 @@ def get_periods_for_user(cookies, registration_id=None):
             return None, None, "Ошибка получения состояния"
 
         state = state_resp.json()
-        user_id = state.get('userId')
+        user_id = student_context(state)['userId']
         if not user_id:
             return None, None, "UserId не найден"
 
@@ -837,8 +863,7 @@ def get_subjects_for_user(cookies, registration_id=None):
             return None, "Ошибка получения состояния"
 
         state = state_resp.json()
-        user_data = state.get('user', {}) if isinstance(state, dict) else {}
-        prs_id = user_data.get('prsId') if isinstance(user_data, dict) else None
+        prs_id = student_context(state)['prsId']
         if not prs_id:
             return None, "PrsId не найден"
 
@@ -895,7 +920,7 @@ def get_grades_for_period(cookies, period_id, registration_id=None):
             return None, None, None, "Ошибка получения состояния"
 
         state = state_resp.json()
-        user_id = state.get('userId')
+        user_id = student_context(state)['userId']
         if not user_id:
             return None, None, None, "UserId не найден"
 
@@ -1077,6 +1102,9 @@ def login_and_get_data(username, password):
             log(f"[Notify] No prsId found for {username}")
             return None, None, None, None, None, None
 
+        owner_prs_id = prs_id
+        prs_id = student_context(state)['prsId']
+
         # дневник отдаёт и домашнее задание, и оценки одним запросом
         today = datetime.now()
         # d1 и d2 ждут миллисекунды
@@ -1161,6 +1189,7 @@ def login_and_get_data(username, password):
                                 # за id домашнего задания берём variant_id, он уникален
                                 homework_list.append({
                                     'id': variant_id,
+                                    'partId': part.get('id'),
                                     'lessonId': lesson_id,
                                     'subject': subject_name,
                                     'subjectId': lesson_subject_id_map.get(lesson_key),
@@ -1228,13 +1257,16 @@ def login_and_get_data(username, password):
             lpart_items = _fetch_lpart(cookies, prs_id, year_id, d1, d2, headers)
             _merge_lpart(homework_list, lpart_items)
 
+        for homework in homework_list:
+            homework['studentPrsId'] = prs_id
+
         notifications_list, session_expired = _fetch_chat_threads(cookies, headers)
         if session_expired:
             return None, None, None, None, None, None
 
         profile = state.get('profile', {}) or {}
         first_name = profile.get('firstName', username) if isinstance(profile, dict) else username
-        return homework_list, grades_list, notifications_list, first_name, cookies, prs_id
+        return homework_list, grades_list, notifications_list, first_name, cookies, owner_prs_id
 
     except Exception as e:
         log(f"[Notify] Error fetching data for {username}: {e}")
@@ -1565,7 +1597,7 @@ def _check_user_for_updates(registration):
         if not isinstance(tg_attachments, list):
             tg_attachments = []
         if not tg_attachments and hw.get('hasFiles') and hw.get('partId') and cookies and prs_id and lpart_headers:
-            detail = _fetch_lpart_detail(cookies, prs_id, hw['partId'], lpart_headers)
+            detail = _fetch_lpart_detail(cookies, hw.get('studentPrsId', prs_id), hw['partId'], lpart_headers)
             if detail:
                 tg_attachments = _extract_lpart_attachments(detail)
                 hw['attachments'] = tg_attachments

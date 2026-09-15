@@ -21,18 +21,41 @@ import java.util.Locale
 
 internal fun JSONObject.text(key: String): String = if (isNull(key)) "" else optString(key, "")
 
-internal class WidgetSnapshot(context: Context, val type: String) {
+internal class WidgetSnapshot(context: Context, val type: String, now: Date = Date()) {
     private val preferences = context.getSharedPreferences("HomeWidgetPreferences", Context.MODE_PRIVATE)
     private fun read(key: String) = runCatching { JSONObject(preferences.getString(key, "{}") ?: "{}") }.getOrDefault(JSONObject())
     val config = read("widget_config")
     private val raw = read("widget_${type}_data")
     val enabled = config.optBoolean("${type}Enabled", true)
-    private val today = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
+    private val localToday = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(now)
+    private val schedule = if (type == "schedule") raw else read("widget_schedule_data")
+    private val calendarDays: List<JSONObject> = run {
+        val days = schedule.optJSONArray("days")
+        val result = (0 until (days?.length() ?: 0)).mapNotNull { days?.optJSONObject(it) }.toMutableList()
+        if (schedule.text("dateISO").isNotEmpty() && result.none { it.text("dateISO") == schedule.text("dateISO") }) {
+            result.add(schedule)
+        }
+        result.sortedBy { it.text("dateISO") }
+    }
+    private val currentDay = calendarDays.firstOrNull { day ->
+        if (!day.isNull("dayStartMs") && !day.isNull("dayEndMs")) {
+            now.time >= day.optLong("dayStartMs") && now.time < day.optLong("dayEndMs")
+        } else day.text("dateISO") == localToday
+    }
+    private val today = currentDay?.text("dateISO") ?: localToday
+    private fun hasLessons(day: JSONObject): Boolean {
+        val lessons = day.optJSONArray("lessons")
+        return (0 until (lessons?.length() ?: 0)).any { lessons?.optJSONObject(it)?.optBoolean("isPlaceholder", false) == false }
+    }
+    private val schoolEnded = currentDay?.let {
+        hasLessons(it) && !it.isNull("schoolEndMs") && now.time >= it.optLong("schoolEndMs")
+    } ?: false
     val payload: JSONObject = if (type == "schedule") {
-        val days = raw.optJSONArray("days")
-        (0 until (days?.length() ?: 0)).mapNotNull { days?.optJSONObject(it) }
-            .firstOrNull { it.text("dateISO") == today }
-            ?: if (raw.text("dateISO") == today) raw else JSONObject()
+        when {
+            currentDay == null -> JSONObject()
+            hasLessons(currentDay) && !schoolEnded -> currentDay
+            else -> calendarDays.firstOrNull { it.text("dateISO") > today && hasLessons(it) } ?: JSONObject()
+        }
     } else raw
     val items: List<JSONObject>
     val colors: JSONObject
@@ -51,7 +74,7 @@ internal class WidgetSnapshot(context: Context, val type: String) {
         items = if (!enabled) emptyList() else (0 until (array?.length() ?: 0))
             .mapNotNull { array?.optJSONObject(it) }
             .filter { type != "schedule" || !it.optBoolean("isPlaceholder", false) }
-            .filter { type != "homework" || it.text("dateISO") >= today }
+            .filter { type != "homework" || if (schoolEnded) it.text("dateISO") > today else it.text("dateISO") >= today }
             .take(limit)
         val appearance = read("widget_appearance")
         val systemDark = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES

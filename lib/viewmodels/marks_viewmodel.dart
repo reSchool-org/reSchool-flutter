@@ -60,8 +60,8 @@ class MarksViewModel extends ChangeNotifier {
       !_disposed && generation == _marksCache.generation;
 
   String? get _cacheIdentity {
-    final userId = _api.userId;
-    final prsId = _api.currentPrsId;
+    final userId = _api.studentUserId;
+    final prsId = _api.studentPrsId;
     if (userId == null || prsId == null) return null;
     return '${_api.isDemo ? 'demo' : 'school'}_${userId}_$prsId';
   }
@@ -94,7 +94,7 @@ class MarksViewModel extends ChangeNotifier {
     super.dispose();
   }
 
-  int? get currentUserId => _api.userId;
+  int? get currentUserId => _api.studentUserId;
 
   Future<void> loadPeriods({bool forceRefresh = false}) async {
     final generation = _marksCache.generation;
@@ -244,7 +244,7 @@ class MarksViewModel extends ChangeNotifier {
     try {
       final yearId = await _api.getCurrentYearId();
       if (!_isCurrent(generation)) return;
-      final prsId = _api.currentPrsId;
+      final prsId = _api.studentPrsId;
       if (prsId == null) throw Exception('PRS ID not found');
 
       final json = await _api.getPupilUnits(
@@ -277,14 +277,14 @@ class MarksViewModel extends ChangeNotifier {
 
   PlanSuccessRoot? getPlanSuccessForUnit(int unitId) {
     final period = selectedPeriod;
-    final userId = _api.userId;
+    final userId = _api.studentUserId;
     if (period == null || userId == null) return null;
     return _planSuccessByKey[_planKey(period.groupId, unitId, userId)];
   }
 
   bool isPlanSuccessLoading(int unitId) {
     final period = selectedPeriod;
-    final userId = _api.userId;
+    final userId = _api.studentUserId;
     if (period == null || userId == null) return false;
     return _planSuccessLoadingKeys.contains(
       _planKey(period.groupId, unitId, userId),
@@ -293,7 +293,7 @@ class MarksViewModel extends ChangeNotifier {
 
   String? getPlanSuccessError(int unitId) {
     final period = selectedPeriod;
-    final userId = _api.userId;
+    final userId = _api.studentUserId;
     if (period == null || userId == null) return null;
     return _planSuccessErrorByKey[_planKey(period.groupId, unitId, userId)];
   }
@@ -306,11 +306,11 @@ class MarksViewModel extends ChangeNotifier {
     final period = selectedPeriod;
     if (period == null) return;
 
-    if (_api.userId == null) {
+    if (_api.studentUserId == null) {
       await _api.getClassByUser();
     }
     if (!_isCurrent(generation)) return;
-    final userId = _api.userId;
+    final userId = _api.studentUserId;
     if (userId == null) return;
 
     final key = _planKey(period.groupId, unitId, userId);
@@ -424,6 +424,7 @@ class MarksViewModel extends ChangeNotifier {
                   subject: s.name,
                   average: s.average,
                   rating: s.rating,
+                  totalMarks: s.marks.length,
                 ),
               )
               .toList(),

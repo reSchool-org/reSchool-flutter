@@ -9,6 +9,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request, send_file, render_template_string, g as _g
 from werkzeug.utils import secure_filename
 
+from ..student_context import student_context
 from .. import cache
 from ..school_dates import school_date, SCHOOL_TIMEZONE
 from ..database import (
@@ -479,9 +480,7 @@ def _resolve_identity_from_registration_session(registration_id):
         profile = state.get('profile', {}) if isinstance(state, dict) else {}
         full_name = _full_name_from_profile(profile)
 
-        user_id = state.get('userId')
-        if not user_id and isinstance(user, dict):
-            user_id = user.get('userId')
+        user_id = student_context(state)['userId']
         if not user_id:
             return prs_id, None, full_name
 

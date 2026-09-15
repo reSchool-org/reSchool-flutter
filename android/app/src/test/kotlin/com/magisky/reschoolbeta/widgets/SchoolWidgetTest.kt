@@ -89,6 +89,48 @@ class SchoolWidgetTest {
         assertTrue(WidgetSnapshot(context, "schedule").items.isEmpty())
     }
 
+    @Test fun lastBellHidesTodaysHomeworkAndSkipsWeekend() {
+        fun instant(value: String) = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).parse(value)!!
+        fun day(key: String, end: String?, lessons: JSONArray): JSONObject =
+            payload("lessons", lessons).put("dateISO", key).put("date", key)
+                .put("dayStartMs", instant("$key 00:00:00").time)
+                .put("dayEndMs", instant("$key 00:00:00").time + 86400000)
+                .put("schoolEndMs", end?.let { instant("$key $it").time } ?: JSONObject.NULL)
+        val saturday = day("2026-09-19", "11:45:30", JSONArray().put(item()).put(item().put("num", 3)))
+        val sunday = day("2026-09-20", null, JSONArray())
+        val monday = day("2026-09-21", "09:15:00", JSONArray().put(item().put("subject", "Физика")))
+        save("widget_schedule_data", JSONObject(saturday.toString()).put("days", JSONArray().put(saturday).put(sunday).put(monday)))
+        save("widget_homework_data", payload("items", JSONArray()
+            .put(item().put("dateISO", "2026-09-19"))
+            .put(item().put("dateISO", "2026-09-21"))))
+        // ДЗ должно переключаться и без включённого виджета расписания.
+        save("widget_config", JSONObject().put("scheduleEnabled", false))
+        for (time in listOf("07:00:00", "10:00:00", "11:45:29")) {
+            val now = instant("2026-09-19 $time")
+            assertEquals(2, WidgetSnapshot(context, "homework", now).items.size)
+        }
+        val end = instant("2026-09-19 11:45:30")
+        assertEquals("2026-09-21", WidgetSnapshot(context, "homework", end).items.single().text("dateISO"))
+        save("widget_config", JSONObject())
+        assertEquals("2026-09-19", WidgetSnapshot(context, "schedule", instant("2026-09-19 11:45:29")).payload.text("dateISO"))
+        assertEquals("2026-09-21", WidgetSnapshot(context, "schedule", end).payload.text("dateISO"))
+        assertEquals("2026-09-21", WidgetSnapshot(context, "schedule", instant("2026-09-20 12:00:00")).payload.text("dateISO"))
+        assertEquals("2026-09-21", WidgetSnapshot(context, "schedule", instant("2026-09-21 08:00:00")).payload.text("dateISO"))
+    }
+
+    @Test fun missingBellTimeKeepsTodaysHomeworkAndSchedule() {
+        val end = Date()
+        val day = payload("lessons", JSONArray().put(item()))
+            .put("dayStartMs", end.time - 1000).put("dayEndMs", end.time + 1000)
+            .put("schoolEndMs", JSONObject.NULL)
+        save("widget_schedule_data", day)
+        save("widget_homework_data", payload("items", JSONArray().put(item())))
+        assertEquals(1, WidgetSnapshot(context, "homework", end).items.size)
+        assertEquals(1, WidgetSnapshot(context, "schedule", end).items.size)
+        prefs.edit().remove("widget_schedule_data").commit()
+        assertEquals(1, WidgetSnapshot(context, "homework", end).items.size)
+    }
+
     @Test fun limitsAndTeacherPreferenceApplyWithoutAnotherDataFetch() {
         save("widget_schedule_data", payload("lessons", JSONArray().put(item())))
         save("widget_homework_data", payload("items", JSONArray().put(item()).put(item())))

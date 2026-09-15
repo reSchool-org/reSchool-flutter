@@ -418,9 +418,9 @@ class _LoginScreenState extends State<LoginScreen>
                       children: [
                         const SizedBox(height: 48),
                         _buildLogo(colorScheme, isDark, l10n),
-                        const SizedBox(height: 64),
+                        const SizedBox(height: 32),
                         _buildLoginForm(colorScheme, isDark, l10n),
-                        const SizedBox(height: 48),
+                        const SizedBox(height: 24),
                         _buildFooter(colorScheme, l10n),
                         const SizedBox(height: 32),
                       ],

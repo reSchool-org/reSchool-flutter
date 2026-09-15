@@ -147,61 +147,6 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
-  Future<void> _showDiaryInitialDayDialog(
-    BuildContext context,
-    SettingsProvider settings,
-  ) async {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    await showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text(
-          'Открывать в дневнике',
-          style: appFont(context, fontWeight: FontWeight.w600),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              title: Text('Сегодня', style: appFont(context)),
-              trailing: settings.diaryInitialDay == 'today'
-                  ? Icon(Icons.check_rounded, color: colorScheme.primary)
-                  : null,
-              onTap: () {
-                settings.setDiaryInitialDay('today');
-                Navigator.pop(context);
-              },
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            ListTile(
-              title: Text('Завтра', style: appFont(context)),
-              trailing: settings.diaryInitialDay == 'tomorrow'
-                  ? Icon(Icons.check_rounded, color: colorScheme.primary)
-                  : null,
-              onTap: () {
-                settings.setDiaryInitialDay('tomorrow');
-                Navigator.pop(context);
-              },
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('Отмена', style: appFont(context)),
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<int?> _showNumberInputDialog(
     BuildContext context,
     String title,
@@ -783,16 +728,6 @@ class _SettingsScreenState extends State<SettingsScreen>
           subtitle: 'Иконка чата рядом с именем учителя в дневнике и оценках',
           value: settingsProvider.teacherChatEnabled,
           onChanged: (v) => settingsProvider.setTeacherChatEnabled(v),
-          colorScheme: colorScheme,
-        ),
-        _SettingsDivider(colorScheme: colorScheme),
-        _SettingsRow(
-          icon: Icons.today_rounded,
-          title: 'Открывать в дневнике',
-          subtitle: settingsProvider.diaryInitialDay == 'tomorrow'
-              ? 'Завтра'
-              : 'Сегодня',
-          onTap: () => _showDiaryInitialDayDialog(context, settingsProvider),
           colorScheme: colorScheme,
         ),
       ],
@@ -1954,7 +1889,8 @@ class _SettingsScreenState extends State<SettingsScreen>
               value: widgetConfig.gradesEnabled,
               onChanged: (v) => widgetConfig.setGradesEnabled(v),
               colorScheme: colorScheme,
-              expandedContent: widgetConfig.gradesEnabled
+              expandedContent: widgetConfig.gradesEnabled &&
+                      (kIsWeb || !(Platform.isIOS || Platform.isMacOS))
                   ? _SettingsDropdown(
                       title: l10n.subjects,
                       value: widgetConfig.gradesSubjectsCount,

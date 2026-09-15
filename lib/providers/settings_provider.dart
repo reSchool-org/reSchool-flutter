@@ -19,7 +19,6 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> reloadCloudSettings() => _loadSettings();
 
   bool _displayOnlyCurrentClass = true;
-  String _diaryInitialDay = 'today'; // today или tomorrow
   int _hwDaysPast = 14;
   int _hwDaysFuture = 14;
   Locale _locale = const Locale('ru');
@@ -51,7 +50,6 @@ class SettingsProvider extends ChangeNotifier {
 
   // простые геттеры
   bool get displayOnlyCurrentClass => _displayOnlyCurrentClass;
-  String get diaryInitialDay => _diaryInitialDay;
   int get hwDaysPast => _hwDaysPast;
   int get hwDaysFuture => _hwDaysFuture;
   Locale get locale => _locale;
@@ -92,7 +90,6 @@ class SettingsProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _displayOnlyCurrentClass =
         prefs.getBool('display_only_current_class') ?? true;
-    _diaryInitialDay = prefs.getString('diary_initial_day') ?? 'today';
     _hwDaysPast = prefs.getInt('hw_days_past') ?? 14;
     _hwDaysFuture = prefs.getInt('hw_days_future') ?? 14;
     final storedDevMode = prefs.getBool('developer_mode') ?? false;
@@ -168,13 +165,6 @@ class SettingsProvider extends ChangeNotifier {
   // прокси лежит тут, пока ApiService не заберёт его после инициализации
   ({String url, String token})? _pendingWebProxy;
   ({String url, String token})? get pendingWebProxy => _pendingWebProxy;
-
-  Future<void> setDiaryInitialDay(String value) async {
-    _diaryInitialDay = value;
-    notifyListeners();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('diary_initial_day', value);
-  }
 
   Future<void> setDisplayOnlyCurrentClass(bool value) async {
     _displayOnlyCurrentClass = value;

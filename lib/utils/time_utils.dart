@@ -1,4 +1,16 @@
 class TimeUtils {
+  /// Не объявляем день законченным, если время хотя бы одного урока неизвестно.
+  static int? lastLessonEnd(Iterable<String> times) {
+    final pattern = RegExp(r'^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$');
+    int? latest;
+    for (final time in times) {
+      if (!pattern.hasMatch(time)) return null;
+      final seconds = toSeconds(time);
+      if (latest == null || seconds > latest) latest = seconds;
+    }
+    return latest;
+  }
+
   static int toMinutes(String time) {
     final parts = time.split(':');
     if (parts.length < 2 || parts.length > 3) return -1;

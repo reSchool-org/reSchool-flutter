@@ -136,6 +136,14 @@ void main() {
       addTearDown(service.dispose);
       await service.syncIfDue();
       expect(
+        service
+            .fromMoscowTime(serverNow.add(const Duration(hours: 3)))
+            .difference(current)
+            .inSeconds
+            .abs(),
+        lessThan(2),
+      );
+      expect(
         service.moscowNow
             .difference(serverNow.add(const Duration(hours: 3)))
             .inSeconds
@@ -221,6 +229,25 @@ void main() {
     await provider.setWeekdayPreset(DateTime.tuesday, 'fml30_7liniya');
     await provider.setAutoScheduleEnabled(true);
     expect(provider.timeOffset, 126);
+    expect(
+      provider.getLessonTime(1, date: DateTime(2026, 9, 14))!.end,
+      '09:37:13',
+    );
+    expect(
+      provider.getLessonTime(1, date: DateTime(2026, 9, 15))!.end,
+      '09:14:48',
+    );
+    expect(
+      provider
+          .deviceTimeForDate(
+            DateTime(2026, 9, 15),
+            seconds: 9 * 3600 + 14 * 60 + 48,
+          )
+          .difference(DateTime.utc(2026, 9, 15, 6, 14, 48))
+          .inSeconds
+          .abs(),
+      lessThan(2),
+    );
     current = current.add(const Duration(days: 1));
     expect(provider.effectivePresetId, 'fml30_7liniya');
     expect(provider.timeOffset, -12);
@@ -246,5 +273,12 @@ void main() {
   test('seconds survive positive and negative time corrections', () {
     expect(TimeUtils.addSeconds('08:50:07', 126), '08:52:13');
     expect(TimeUtils.addSeconds('00:00:05', -10), '23:59:55');
+  });
+  test('last bell requires valid times for every lesson', () {
+    expect(TimeUtils.lastLessonEnd(['11:45:30', '09:15']), 42330);
+    expect(TimeUtils.lastLessonEnd([]), isNull);
+    expect(TimeUtils.lastLessonEnd(['11:45', '']), isNull);
+    expect(TimeUtils.lastLessonEnd(['11:45', 'bad:time']), isNull);
+    expect(TimeUtils.lastLessonEnd(['25:00']), isNull);
   });
 }

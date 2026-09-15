@@ -26,13 +26,7 @@ class DiaryScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context, listen: false);
-    final now = DateTime.now();
-    final initialDate =
-        DiaryNavigationService.instance.pending.value?.date ??
-        (settings.diaryInitialDay == 'tomorrow'
-            ? now.add(const Duration(days: 1))
-            : now);
+    final initialDate = DiaryNavigationService.instance.pending.value?.date;
     return ChangeNotifierProvider(
       create: (_) => DiaryViewModel(
         Provider.of<BellScheduleProvider>(context, listen: false),
@@ -156,7 +150,7 @@ class _DiaryViewState extends State<DiaryView>
     if (req == null) return;
     final vm = context.read<DiaryViewModel>();
     final target = req.date ?? vm.selectedDate;
-    if (!vm.isSameDay(vm.selectedDate, target)) vm.selectDate(target);
+    vm.selectDate(target);
     // пролистывание промежуточных дней может перезаписать цель перехода
     if (_pageController.hasClients) {
       _isProgrammaticPageChange = true;

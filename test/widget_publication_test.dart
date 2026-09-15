@@ -94,9 +94,14 @@ void main() {
                       : 'updateWidget'),
             )
             .toList();
-        expect(reloads, hasLength(3));
-        for (var i = 0; i < 3; i++) {
-          final kind = ['ScheduleWidget', 'HomeworkWidget', 'GradesWidget'][i];
+        expect(reloads, hasLength(4));
+        for (var i = 0; i < 4; i++) {
+          final kind = [
+            'ScheduleWidget',
+            'HomeworkWidget',
+            'HomeworkWidget',
+            'GradesWidget',
+          ][i];
           final args = reloads[i].arguments as Map;
           expect(
             args[platform == TargetPlatform.macOS
@@ -106,7 +111,12 @@ void main() {
                 : 'android'],
             platform == TargetPlatform.android ? 'widgets.$kind' : kind,
           );
-          expect(calls[calls.indexOf(reloads[i]) - 1].method, 'saveWidgetData');
+          if (i != 1) {
+            expect(
+              calls[calls.indexOf(reloads[i]) - 1].method,
+              'saveWidgetData',
+            );
+          }
         }
         if (platform == TargetPlatform.iOS) {
           expect(calls.first.method, 'setAppGroupId');
@@ -164,6 +174,113 @@ void main() {
       expect((saved['lessons'] as List).single['num'], 1);
       expect((saved['days'] as List).last['dateISO'], '2026-09-21');
       expect((saved['days'] as List).last['lessons'][0]['num'], 5);
+    },
+  );
+
+  for (final platform in [
+    TargetPlatform.iOS,
+    TargetPlatform.macOS,
+    TargetPlatform.android,
+  ]) {
+    test(
+      'grades prioritize mark counts and retain all subjects on $platform',
+      () async {
+        final widgets = service(platform);
+        final grades = [
+          WidgetGrade(subject: 'Алгебра', average: '0.00', totalMarks: 0),
+          WidgetGrade(subject: 'История', average: '5.00', totalMarks: 1),
+          WidgetGrade(subject: 'Физика', average: '3.00', totalMarks: 7),
+          WidgetGrade(subject: 'Химия', average: '4.00', totalMarks: 7),
+          WidgetGrade(subject: 'География', average: '4.50', totalMarks: 3),
+          WidgetGrade(subject: 'Без данных', average: '-'),
+          for (var i = 0; i < 12; i++)
+            WidgetGrade(subject: 'Предмет $i', average: '-', totalMarks: 0),
+        ];
+        await widgets.updateGradesWidget(
+          grades: grades,
+          periodName: '1 четверть',
+        );
+        final saved = data[WidgetDataKeys.gradesData]!;
+        final subjects = saved['grades'] as List;
+        expect(subjects, hasLength(18));
+        expect(subjects.take(6).map((s) => s['subject']), [
+          'Физика',
+          'Химия',
+          'География',
+          'История',
+          'Алгебра',
+          'Без данных',
+        ]);
+        expect(subjects.take(4).map((s) => s['totalMarks']), [7, 7, 3, 1]);
+        expect(saved['periodName'], '1 четверть');
+        expect(grades.first.subject, 'Алгебра');
+      },
+    );
+  }
+
+  test(
+    'schedule publishes last bell and schedules both widgets at that instant',
+    () async {
+      final widgets = service(TargetPlatform.android);
+      final end = DateTime(now.year, now.month, now.day, 14, 45, 30);
+      await widgets.updateScheduleWidget(
+        lessons: [
+          lesson(1),
+          lesson(3).copyWith(endTime: '14:45:30'),
+        ],
+        date: now,
+      );
+      final saved = data[WidgetDataKeys.scheduleData]!;
+      expect(saved['schoolEndMs'], end.millisecondsSinceEpoch);
+      expect(
+        saved['dayStartMs'],
+        DateTime(now.year, now.month, now.day).millisecondsSinceEpoch,
+      );
+      final scheduled = calls
+          .where((call) => call.method == 'scheduleWidgetUpdates')
+          .toList();
+      expect(scheduled, hasLength(2));
+      for (final call in scheduled) {
+        expect(
+          (call.arguments as Map).values.toString(),
+          contains(end.millisecondsSinceEpoch.toString()),
+        );
+      }
+    },
+  );
+
+  test('unknown last bell leaves school end unset and long holidays retain next lessons', () async {
+    final widgets = service(TargetPlatform.iOS);
+    final nextTerm = DateTime(2027, 1, 11);
+    await widgets.updateScheduleWidget(
+      lessons: [
+        lesson(1),
+        lesson(8).copyWith(endTime: ''),
+      ],
+      date: now,
+      days: {
+        nextTerm: [lesson(1)],
+      },
+    );
+    final saved = data[WidgetDataKeys.scheduleData]!;
+    expect(saved['schoolEndMs'], isNull);
+    expect((saved['days'] as List).last['dateISO'], '2027-01-11');
+  });
+
+  test(
+    'today cannot exhaust the homework cache before tomorrow is saved',
+    () async {
+      final widgets = service(TargetPlatform.iOS);
+      final tomorrow = now.add(const Duration(days: 1));
+      await widgets.updateHomeworkWidget(
+        items: [
+          for (var i = 0; i < 25; i++) homework(now, text: 'Сегодня $i'),
+          homework(tomorrow, text: 'Завтра'),
+        ],
+      );
+      final saved = data[WidgetDataKeys.homeworkData]!['items'] as List;
+      expect(saved, hasLength(21));
+      expect(saved.last['text'], 'Завтра');
     },
   );
 

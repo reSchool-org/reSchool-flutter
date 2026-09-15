@@ -14,6 +14,22 @@ struct WidgetScheduleDay: Decodable {
     let date: String
     let dateISO: String?
     let lessons: [WidgetLesson]
+    var dayStartMs: Double? = nil
+    var dayEndMs: Double? = nil
+    var schoolEndMs: Double? = nil
+
+    var hasLessons: Bool { lessons.contains { !$0.isPlaceholder } }
+    func contains(_ date: Date) -> Bool {
+        if let start = dayStartMs, let end = dayEndMs {
+            let instant = date.timeIntervalSince1970 * 1000
+            return instant >= start && instant < end
+        }
+        return dateISO == WidgetDates.key(date)
+    }
+    func schoolEnded(at date: Date) -> Bool {
+        guard hasLessons, let end = schoolEndMs else { return false }
+        return date.timeIntervalSince1970 * 1000 >= end
+    }
 }
 
 struct WidgetScheduleData: Decodable {
@@ -22,14 +38,31 @@ struct WidgetScheduleData: Decodable {
     let lessons: [WidgetLesson]
     let lastUpdated: String
     let days: [WidgetScheduleDay]?
+    var dayStartMs: Double? = nil
+    var dayEndMs: Double? = nil
+    var schoolEndMs: Double? = nil
 
     static let empty = WidgetScheduleData(date: "", dateISO: nil, lessons: [], lastUpdated: "", days: nil)
 
-    func day(at date: Date) -> WidgetScheduleDay? {
-        let key = WidgetDates.key(date)
-        return days?.first { $0.dateISO == key }
-            ?? (dateISO == key ? WidgetScheduleDay(date: self.date, dateISO: dateISO, lessons: lessons) : nil)
+    var calendarDays: [WidgetScheduleDay] {
+        var result = days ?? []
+        if let key = dateISO, !result.contains(where: { $0.dateISO == key }) {
+            result.append(WidgetScheduleDay(date: date, dateISO: dateISO, lessons: lessons,
+                                           dayStartMs: dayStartMs, dayEndMs: dayEndMs, schoolEndMs: schoolEndMs))
+        }
+        return result.sorted { ($0.dateISO ?? "") < ($1.dateISO ?? "") }
     }
+
+    func currentDay(at date: Date) -> WidgetScheduleDay? {
+        calendarDays.first { $0.contains(date) }
+    }
+
+    func day(at date: Date) -> WidgetScheduleDay? {
+        guard let today = currentDay(at: date) else { return nil }
+        if today.hasLessons && !today.schoolEnded(at: date) { return today }
+        return calendarDays.first { ($0.dateISO ?? "") > (today.dateISO ?? "") && $0.hasLessons }
+    }
+
 }
 
 struct WidgetLesson: Decodable {
@@ -148,10 +181,15 @@ enum WidgetDates {
         return formatter.string(from: date)
     }
 
-    static func timeline(from now: Date = Date()) -> [Date] {
+    static func timeline(from now: Date = Date(), schedule: WidgetScheduleData? = nil) -> [Date] {
         // будущие записи переключают дни из кеша, даже если приложение закрыто
         let start = Calendar.current.startOfDay(for: now)
-        return [now] + (1...8).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: start) }
+        let midnights = (1...8).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: start) }
+        let horizon = midnights.last ?? now
+        let transitions = (schedule?.calendarDays ?? []).flatMap { day in
+            [day.dayStartMs, day.schoolEndMs].compactMap { $0 }.map { Date(timeIntervalSince1970: $0 / 1000) }
+        }.filter { $0 > now && $0 <= horizon }
+        return Array(Set([now] + midnights + transitions)).sorted()
     }
 
     static func updated(_ raw: String, at date: Date) -> String {
@@ -201,48 +239,66 @@ struct WidgetCanvas: View {
 
     private var palette: WidgetPalette { preferences.appearance.palette(for: colorScheme) }
     private var enabled: Bool { preferences.settings.enabled(type) }
+    private var denseSchedule: Bool { type == "schedule" && family == .systemLarge }
     private var padding: CGFloat {
         if #available(iOS 17.0, macOS 14.0, *) { return 0 }
         return 14
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: denseSchedule ? 6 : 8) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .medium))
                     .foregroundColor(Color(widgetARGB: palette.accent))
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
+                if denseSchedule {
                     Text(title).font(.system(size: 14, weight: .semibold))
                         .foregroundColor(Color(widgetARGB: palette.text)).lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 4)
                     Text(enabled ? subtitle : "Выключен в настройках")
                         .font(.system(size: 10)).foregroundColor(Color(widgetARGB: palette.secondary))
                         .lineLimit(1)
+                } else {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title).font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(Color(widgetARGB: palette.text)).lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        Text(enabled ? subtitle : "Выключен в настройках")
+                            .font(.system(size: 10)).foregroundColor(Color(widgetARGB: palette.secondary))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
             }
             if rows.isEmpty || !enabled {
                 Text(enabled ? emptyMessage : "Включите виджет в приложении")
                     .font(.system(size: 12)).foregroundColor(Color(widgetARGB: palette.secondary))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if denseSchedule {
+                WidgetScheduleList(rows: rows, palette: palette)
             } else {
                 GeometryReader { geometry in
                     let columns = family != .systemSmall && type != "schedule" ? 2 : 1
+                    let spacing: CGFloat = type == "grades" ? 4 : 6
                     let preferredHeight: CGFloat = type == "homework" ? 70 : (type == "schedule" ? 52 : 40)
-                    let lineCount = max(1, Int((geometry.size.height + 6) / (preferredHeight + 6)))
+                    let targetHeight: CGFloat = type == "grades" ? 34 : preferredHeight
+                    let capacity = max(1, Int((geometry.size.height + spacing) / (targetHeight + spacing))) * columns
+                    let overflowHeight: CGFloat = type == "grades" && rows.count > capacity ? 16 : 0
+                    let availableHeight = max(0, geometry.size.height - overflowHeight)
+                    let lineCount = max(1, Int((availableHeight + spacing) / (targetHeight + spacing)))
                     let count = min(rows.count, lineCount * columns)
                     let visibleLines = (count + columns - 1) / columns
-                    let height = max(0, (geometry.size.height - CGFloat(visibleLines - 1) * 6) / CGFloat(visibleLines))
-                    VStack(spacing: 6) {
+                    let height = max(0, (availableHeight - CGFloat(visibleLines - 1) * spacing) / CGFloat(visibleLines))
+                    VStack(alignment: .leading, spacing: spacing) {
                         ForEach(0..<visibleLines, id: \.self) { line in
-                            HStack(spacing: 6) {
+                            HStack(spacing: spacing) {
                                 ForEach(0..<columns, id: \.self) { column in
                                     let index = line * columns + column
                                     if index < count {
-                                        WidgetRowView(row: rows[index], palette: palette, compact: height < 64)
+                                        WidgetRowView(row: rows[index], palette: palette, compact: height < 64,
+                                                      dense: type == "grades" && height < 40)
                                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     } else {
                                         Color.clear.frame(maxWidth: .infinity)
@@ -250,7 +306,13 @@ struct WidgetCanvas: View {
                                 }
                             }.frame(height: min(height, preferredHeight))
                         }
-                        Spacer(minLength: 0)
+                        if type == "grades" && count < rows.count {
+                            Text("Ещё предметов: \(rows.count - count)")
+                                .font(.system(size: 9))
+                                .foregroundColor(Color(widgetARGB: palette.secondary))
+                                .lineLimit(1)
+                                .frame(height: 12)
+                        }
                     }
                 }
             }
@@ -272,18 +334,98 @@ struct WidgetCanvas: View {
     }
 }
 
+/// В большом расписании высоту отдаём урокам, а время ставим рядом с предметом.
+private struct WidgetScheduleList: View {
+    let rows: [WidgetRow]
+    let palette: WidgetPalette
+
+    var body: some View {
+        GeometryReader { geometry in
+            let spacing: CGFloat = 2
+            let minimumHeight: CGFloat = 30
+            let capacity = max(1, Int((geometry.size.height + spacing) / (minimumHeight + spacing)))
+            let overflowHeight: CGFloat = rows.count > capacity ? 14 : 0
+            let availableHeight = max(0, geometry.size.height - overflowHeight)
+            let count = min(rows.count, max(1, Int((availableHeight + spacing) / (minimumHeight + spacing))))
+            let rowHeight = min(40, max(0, (availableHeight - CGFloat(count - 1) * spacing) / CGFloat(count)))
+            VStack(alignment: .leading, spacing: spacing) {
+                ForEach(0..<count, id: \.self) { index in
+                    WidgetScheduleRowView(row: rows[index], palette: palette)
+                        .frame(height: rowHeight)
+                }
+                if count < rows.count {
+                    Text("Ещё \(rows.count - count) \(lessonWord(rows.count - count))")
+                        .font(.system(size: 9))
+                        .foregroundColor(Color(widgetARGB: palette.secondary))
+                        .lineLimit(1)
+                        .frame(height: 12)
+                }
+            }
+        }
+    }
+
+    private func lessonWord(_ count: Int) -> String {
+        if (11...14).contains(count % 100) { return "уроков" }
+        switch count % 10 {
+        case 1: return "урок"
+        case 2...4: return "урока"
+        default: return "уроков"
+        }
+    }
+}
+
+private struct WidgetScheduleRowView: View {
+    let row: WidgetRow
+    let palette: WidgetPalette
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(row.badge)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundColor(Color(widgetARGB: palette.accent))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.title).font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(widgetARGB: palette.text))
+                if !row.detail.isEmpty {
+                    Text(row.detail).font(.system(size: 9))
+                        .foregroundColor(Color(widgetARGB: palette.secondary))
+                }
+            }
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(row.meta).font(.system(size: 9)).monospacedDigit()
+                .foregroundColor(Color(widgetARGB: palette.secondary))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background {
+            if #available(iOS 16.0, macOS 13.0, *) {
+                WidgetRowBackground(color: Color(widgetARGB: palette.surface))
+            } else {
+                Color(widgetARGB: palette.surface)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct WidgetRowView: View {
     let row: WidgetRow
     let palette: WidgetPalette
     let compact: Bool
+    var dense: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.title).font(.system(size: 12, weight: .semibold))
+                Text(row.title).font(.system(size: dense ? 11 : 12, weight: .semibold))
                     .foregroundColor(Color(widgetARGB: palette.text)).lineLimit(1)
                 if !row.detail.isEmpty {
-                    Text(row.detail).font(.system(size: 10))
+                    Text(row.detail).font(.system(size: dense ? 9 : 10))
                         .foregroundColor(Color(widgetARGB: palette.secondary)).lineLimit(compact ? 1 : 2)
                 }
                 if !row.meta.isEmpty {
@@ -297,7 +439,7 @@ struct WidgetRowView: View {
                     .lineLimit(1).minimumScaleFactor(0.75)
             }
         }
-        .padding(.horizontal, 8).padding(.vertical, 5)
+        .padding(.horizontal, 8).padding(.vertical, dense ? 3 : 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background {
             if #available(iOS 16.0, macOS 13.0, *) {

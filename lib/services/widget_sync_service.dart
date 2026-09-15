@@ -1,5 +1,3 @@
-import 'package:flutter/material.dart';
-
 import '../models/widget_models.dart';
 import '../providers/bell_schedule_provider.dart';
 import '../providers/settings_provider.dart';
@@ -56,10 +54,12 @@ class WidgetSyncService {
     await bells.ready;
     if (epoch != ApiService().identityEpoch) return;
     final diary = DiaryViewModel(bells, autoLoad: false);
-    final today = DateUtils.dateOnly(DateTime.now());
+    final now = bells.now;
+    final today = DateTime(now.year, now.month, now.day);
+    final monday = today.subtract(Duration(days: today.weekday - 1));
     diary.currentWeek = List.generate(
-      8,
-      (index) => DateTime(today.year, today.month, today.day + index),
+      14,
+      (index) => monday.add(Duration(days: index)),
     );
     final homework = AssignmentsViewModel(settings);
     final grades = MarksViewModel(bells);
@@ -67,7 +67,8 @@ class WidgetSyncService {
     widgets.lastError = null;
     try {
       await Future.wait([
-        if (config.scheduleEnabled) diary.loadSchedule(enrichHomework: false),
+        if (config.scheduleEnabled || config.homeworkEnabled)
+          diary.loadSchedule(enrichHomework: false, findNextSchoolDay: true),
         if (config.homeworkEnabled) homework.loadAssignments(forWidgets: true),
         if (config.gradesEnabled) grades.loadPeriods(forceRefresh: true),
       ]);

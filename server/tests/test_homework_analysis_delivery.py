@@ -58,6 +58,50 @@ class HomeworkMergeTests(unittest.TestCase):
         self.diary['text'] = self.lpart['preview'] = ''
         self.assertEqual(len(self.routes._merge_lpart([self.diary], [self.lpart])), 2)
 
+    def test_truncated_preview_matches_part_and_keeps_full_text(self):
+        self.diary['partId'] = 2
+        self.lpart['preview'] = TEXT[:30]
+        items = self.routes._merge_lpart([self.diary], [self.lpart, self.lpart])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['id'], 1)
+        self.assertEqual(items[0]['text'], TEXT)
+        self.assertTrue(items[0]['hasFiles'])
+        self.assertEqual(len(items[0]['attachments']), 1)
+
+    def test_same_part_preserves_multiple_diary_variants(self):
+        self.diary['partId'] = 2
+        other = dict(self.diary, id=3, text='Другое задание для второй группы')
+        items = self.routes._merge_lpart([self.diary, other], [self.lpart])
+        self.assertEqual([item['id'] for item in items], [1, 3])
+
+    def test_file_only_part_is_not_added_twice(self):
+        self.diary.update(partId=2, text='[Файлы]')
+        self.lpart['preview'] = ''
+        self.assertEqual(len(self.routes._merge_lpart([self.diary], [self.lpart])), 1)
+
+    def test_both_diary_read_paths_keep_part_identity(self):
+        from test_chat_notifications import response
+        for login in (False, True):
+            with self.subTest(login=login):
+                routes = make_routes(*make_chat())
+                routes.get_eschool_version = Mock(return_value='3.0')
+                routes.requests.post.return_value = Mock(status_code=200, cookies={'saved': 'test'})
+                routes.requests.get.side_effect = [
+                    response({'userId': 10, 'user': {'prsId': 100}}),
+                    response({'lesson': [{'id': 5, 'date': self.diary['date'],
+                        'unit': {'name': 'Биология'}, 'part': [{'id': 2, 'cat': 'DZ',
+                        'variant': [{'id': 1, 'text': TEXT}]}]}]}),
+                ]
+                routes._get_year_id = Mock(return_value=2026)
+                routes._fetch_lpart = Mock(return_value=[dict(self.lpart, preview=TEXT[:30])])
+                routes._fetch_chat_threads = Mock(return_value=([], False))
+                result = (routes.login_and_get_data('test', 'test') if login else
+                          routes.fetch_data_with_session({'saved': 'test'}, 'test'))
+                self.assertEqual(len(result[0]), 1)
+                self.assertEqual(result[0][0]['id'], 1)
+                self.assertEqual(result[0][0]['partId'], 2)
+                self.assertEqual(result[0][0]['text'], TEXT)
+
 
 class DocumentAnalysisTests(unittest.TestCase):
     def setUp(self):

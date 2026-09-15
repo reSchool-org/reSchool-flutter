@@ -13,6 +13,8 @@ import '../models/widget_models.dart';
 import '../models/lesson_view_model.dart';
 import '../models/homework_models.dart';
 import '../utils/html_content.dart';
+import '../utils/time_utils.dart';
+import '../providers/bell_schedule_provider.dart';
 
 /// записываем снимки и обновляем виджеты по очереди, сброс аккаунта отменяет ожидающие записи
 class WidgetDataService {
@@ -38,7 +40,7 @@ class WidgetDataService {
   static const _channel = MethodChannel('com.magisky.reschoolbeta/widgets');
   static const _kinds = ['ScheduleWidget', 'HomeworkWidget', 'GradesWidget'];
   final Map<String, String> _published = {};
-  final Map<DateTime, List<LessonViewModel>> _scheduleDays = {};
+  final Map<DateTime, Map<String, dynamic>> _scheduleDays = {};
   Future<void> _pending = Future.value();
   Future<void>? _initialization;
   int _generation = 0;
@@ -147,17 +149,32 @@ class WidgetDataService {
       jsonEncode({...data, 'lastUpdated': _now().toIso8601String()}),
     );
     await _reload(type);
+    // ДЗ использует время окончания школы из снимка расписания.
+    if (type == WidgetType.schedule) await _reload(WidgetType.homework);
     if (_platform == TargetPlatform.android &&
         type != WidgetType.grades &&
         await hasInstalledWidgets()) {
       final now = _now();
-      await HomeWidget.scheduleWidgetUpdates(
-        List.generate(
-          15,
-          (index) => DateTime(now.year, now.month, now.day + index + 1),
-        ),
-        androidName: 'widgets.${_kinds[type.index]}',
-      );
+      final horizon = DateTime(now.year, now.month, now.day + 15);
+      final updates = <int>{
+        for (var i = 1; i <= 15; i++)
+          DateTime(now.year, now.month, now.day + i).millisecondsSinceEpoch,
+        for (final day in _scheduleDays.values)
+          for (final field in ['dayStartMs', 'schoolEndMs'])
+            if (day[field] is int &&
+                (day[field] as int) > now.millisecondsSinceEpoch &&
+                (day[field] as int) <= horizon.millisecondsSinceEpoch)
+              day[field] as int,
+      }.toList()..sort();
+      for (final target
+          in type == WidgetType.schedule
+              ? [WidgetType.schedule, WidgetType.homework]
+              : [type]) {
+        await HomeWidget.scheduleWidgetUpdates(
+          updates.map(DateTime.fromMillisecondsSinceEpoch).toList(),
+          androidName: 'widgets.${_kinds[target.index]}',
+        );
+      }
     }
     _published[key] = content;
   });
@@ -165,24 +182,36 @@ class WidgetDataService {
   Map<String, dynamic> _scheduleDay(
     List<LessonViewModel> lessons,
     DateTime date,
+    BellScheduleProvider? bells,
   ) {
     final sorted = lessons.where((l) => !l.isPlaceholder).toList()
       ..sort((a, b) => a.num.compareTo(b.num));
+    final rows = sorted.map((lesson) {
+      final time = bells?.getLessonTime(lesson.num, date: date);
+      return WidgetLesson(
+        num: lesson.num,
+        subject: lesson.subject,
+        teacher: lesson.teacher,
+        startTime: time?.start ?? lesson.startTime,
+        endTime: time?.end ?? lesson.endTime,
+        mark: lesson.mark,
+      ).toJson();
+    }).toList();
+    final lastEnd = TimeUtils.lastLessonEnd(
+      rows.map((l) => l['endTime'] as String),
+    );
+    DateTime instant(int seconds) =>
+        bells?.deviceTimeForDate(date, seconds: seconds) ??
+        DateTime(date.year, date.month, date.day, 0, 0, seconds);
     return {
       'date': DateFormat('d MMMM', 'ru').format(date),
       'dateISO': DateFormat('yyyy-MM-dd').format(date),
-      'lessons': sorted
-          .map(
-            (l) => WidgetLesson(
-              num: l.num,
-              subject: l.subject,
-              teacher: l.teacher,
-              startTime: l.startTime,
-              endTime: l.endTime,
-              mark: l.mark,
-            ).toJson(),
-          )
-          .toList(),
+      'dayStartMs': instant(0).millisecondsSinceEpoch,
+      'dayEndMs': instant(86400).millisecondsSinceEpoch,
+      'schoolEndMs': lastEnd == null
+          ? null
+          : instant(lastEnd).millisecondsSinceEpoch,
+      'lessons': rows,
     };
   }
 
@@ -190,24 +219,36 @@ class WidgetDataService {
     required List<LessonViewModel> lessons,
     required DateTime date,
     Map<DateTime, List<LessonViewModel>>? days,
+    BellScheduleProvider? bells,
   }) {
-    final snapshot = List<LessonViewModel>.of(lessons);
+    // Снимок содержит реальные моменты последних звонков, включая поправку часов.
+    // Будущим дням назначаем их собственное расписание звонков.
+    final lessonSnapshot = List<LessonViewModel>.of(lessons);
     final week = days?.map(
-      (key, value) => MapEntry(key, List<LessonViewModel>.of(value)),
+      (key, value) => MapEntry(
+        DateTime(key.year, key.month, key.day),
+        List<LessonViewModel>.of(value),
+      ),
     );
     return _publish(WidgetType.schedule, WidgetDataKeys.scheduleData, () {
-      if (week != null) _scheduleDays.addAll(week);
-      _scheduleDays[DateUtils.dateOnly(date)] = snapshot;
-      final today = DateUtils.dateOnly(_now());
+      final snapshot = _scheduleDay(lessonSnapshot, date, bells);
+      if (week != null) {
+        _scheduleDays.addAll(
+          week.map(
+            (key, value) => MapEntry(key, _scheduleDay(value, key, bells)),
+          ),
+        );
+      }
+      _scheduleDays[DateTime(date.year, date.month, date.day)] = snapshot;
+      final now = _now().millisecondsSinceEpoch;
+      final limit = _now().add(const Duration(days: 366));
       _scheduleDays.removeWhere(
-        (key, _) => key.isBefore(today) || key.difference(today).inDays > 14,
+        (key, day) => (day['dayEndMs'] as int) <= now || key.isAfter(limit),
       );
       final dates = _scheduleDays.keys.toList()..sort();
       return {
-        ..._scheduleDay(snapshot, date),
-        'days': dates
-            .map((day) => _scheduleDay(_scheduleDays[day]!, day))
-            .toList(),
+        ...snapshot,
+        'days': dates.map((day) => _scheduleDays[day]!).toList(),
       };
     });
   }
@@ -225,6 +266,7 @@ class WidgetDataService {
               .toList()
             ..sort((a, b) => a.date.compareTo(b.date));
       final seen = <String>{};
+      final perDay = <String, int>{};
       final result = <Map<String, dynamic>>[];
       for (final item in sorted) {
         final text = htmlToPlainText(item.html ?? item.text)
@@ -233,6 +275,9 @@ class WidgetDataService {
         final dateISO = DateFormat('yyyy-MM-dd').format(item.date);
         final identity = '$dateISO|${item.subject}|$text|${item.partId ?? ''}';
         if (!seen.add(identity)) continue;
+        // Сегодняшние задания не должны вытеснять завтрашние из кеша.
+        if ((perDay[dateISO] ?? 0) >= maxItems.clamp(1, 100)) continue;
+        perDay[dateISO] = (perDay[dateISO] ?? 0) + 1;
         final deadline = item.deadline;
         // даты дневника приходят в миллисекундах, старые значения в секундах тоже принимаем
         final deadlineDate =
@@ -258,7 +303,6 @@ class WidgetDataService {
           ).toJson(),
           'dateISO': dateISO,
         });
-        if (result.length >= maxItems.clamp(1, 100)) break;
       }
       return {'items': result};
     });
@@ -268,7 +312,16 @@ class WidgetDataService {
     required List<WidgetGrade> grades,
     required String periodName,
   }) {
-    final snapshot = grades.map((g) => g.toJson()).toList();
+    // Сначала предметы с большим числом оценок за выбранный период.
+    // При равенстве сохраняем исходный порядок, чтобы строки не прыгали.
+    final ordered = grades.asMap().entries.toList()
+      ..sort((a, b) {
+        final byCount = (b.value.totalMarks ?? 0).compareTo(
+          a.value.totalMarks ?? 0,
+        );
+        return byCount != 0 ? byCount : a.key.compareTo(b.key);
+      });
+    final snapshot = ordered.map((entry) => entry.value.toJson()).toList();
     return _publish(
       WidgetType.grades,
       WidgetDataKeys.gradesData,

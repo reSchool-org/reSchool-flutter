@@ -17,7 +17,7 @@ struct ScheduleProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<ScheduleEntry>) -> Void) {
         let data: WidgetScheduleData = WidgetStore.read("widget_schedule_data") ?? .empty
         let preferences = WidgetPreferences.load()
-        let dates = WidgetDates.timeline()
+        let dates = WidgetDates.timeline(schedule: data)
         completion(Timeline(entries: dates.map { ScheduleEntry(date: $0, data: data, preferences: preferences) }, policy: .after(dates.last!)))
     }
 }
@@ -29,13 +29,15 @@ struct ScheduleWidgetEntryView: View {
         let rows = (day?.lessons ?? []).filter { !$0.isPlaceholder }.map { lesson in
             WidgetRow(title: lesson.subject,
                       detail: entry.preferences.settings.showTeacherInSchedule == false ? "" : lesson.teacher,
-                      meta: [lesson.startTime, lesson.endTime].filter { !$0.isEmpty }.joined(separator: " - "),
+                      meta: [lesson.startTime, lesson.endTime].filter { !$0.isEmpty }
+                          .map { $0.split(separator: ":").prefix(2).joined(separator: ":") }
+                          .joined(separator: " - "),
                       badge: String(lesson.num))
         }
         WidgetCanvas(type: "schedule", title: "Расписание", icon: "calendar",
-                     subtitle: day?.date ?? "На сегодня",
+                     subtitle: day?.date ?? "Ближайшие уроки",
                      updated: WidgetDates.updated(entry.data.lastUpdated, at: entry.date),
-                     emptyMessage: day == nil ? "Откройте приложение для обновления" : "Сегодня уроков нет",
+                     emptyMessage: "Откройте приложение, чтобы загрузить ближайший учебный день",
                      rows: rows, preferences: entry.preferences)
     }
 }
@@ -45,7 +47,7 @@ struct ScheduleWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: ScheduleProvider()) { entry in ScheduleWidgetEntryView(entry: entry) }
             .configurationDisplayName("Расписание")
-            .description("Уроки на сегодня")
+            .description("Сегодняшние уроки или ближайший учебный день")
             .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

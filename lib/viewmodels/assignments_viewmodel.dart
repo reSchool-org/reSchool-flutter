@@ -164,6 +164,7 @@ class AssignmentsViewModel extends ChangeNotifier {
                         html: rawText,
                         files: hwFiles,
                         deadline: variant.deadLine,
+                        partId: part.id,
                       ),
                     );
                   }
@@ -207,27 +208,32 @@ class AssignmentsViewModel extends ChangeNotifier {
 
       final lpartItems = await _api.getLPartListPupil(begDate, endDate, yearId);
 
-      // набор того, что уже есть, чтобы не задвоить: день плюс предмет
+      // превью может обрываться посреди слова, сравниваем сначала части урока
+      final existingPartIds = existingItems
+          .map((item) => item.partId)
+          .whereType<int>()
+          .toSet();
+      String contentKey(DateTime date, String subject, String text) =>
+          '${date.year}-${date.month}-${date.day}|${subject.trim().toLowerCase()}|${htmlToPlainText(text).replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase()}';
       final existingKeys = <String>{};
       for (final item in existingItems) {
-        final dayKey = '${item.date.year}-${item.date.month}-${item.date.day}';
-        existingKeys.add(
-          '$dayKey|${item.subject}|${item.text.substring(0, item.text.length.clamp(0, 50))}',
-        );
+        if (item.text.trim().isNotEmpty) {
+          existingKeys.add(contentKey(item.date, item.subject, item.text));
+        }
       }
 
       for (final lpart in lpartItems) {
         if (lpart.passDt == null) continue;
+        if (existingPartIds.contains(lpart.partId)) continue;
         final preview = lpart.preview ?? '';
         if (preview.isEmpty && (lpart.attachCnt ?? 0) == 0) continue;
 
         final date = DateTime.fromMillisecondsSinceEpoch(lpart.passDt!);
         final subject = lpart.unitName ?? 'Предмет';
-        final dayKey = '${date.year}-${date.month}-${date.day}';
-        final dedupKey =
-            '$dayKey|$subject|${preview.substring(0, preview.length.clamp(0, 50))}';
-
-        if (existingKeys.contains(dedupKey)) continue;
+        final dedupKey = contentKey(date, subject, preview);
+        if (preview.trim().isNotEmpty && existingKeys.contains(dedupKey)) {
+          continue;
+        }
 
         // собираем имя учителя
         String? teacherName;
@@ -247,7 +253,8 @@ class AssignmentsViewModel extends ChangeNotifier {
             teacherName: teacherName,
           ),
         );
-        existingKeys.add(dedupKey);
+        if (preview.trim().isNotEmpty) existingKeys.add(dedupKey);
+        if (lpart.partId != null) existingPartIds.add(lpart.partId!);
       }
     } catch (e) {
       // lpart не ответил, переживём, данные дневника на месте

@@ -348,13 +348,6 @@ class _DetailedTimerSheetState extends State<_DetailedTimerSheet> {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: theme.colorScheme.surface,
-                      boxShadow: [
-                        BoxShadow(
-                          color: widget.color.withValues(alpha: 0.2),
-                          blurRadius: 30,
-                          spreadRadius: 5,
-                        ),
-                      ],
                     ),
                   ),
 

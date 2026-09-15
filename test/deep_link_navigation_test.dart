@@ -29,7 +29,10 @@ class DelayedDiary extends DiaryViewModel {
   }
 
   @override
-  Future<void> loadSchedule({bool enrichHomework = true}) async {
+  Future<void> loadSchedule({
+    bool enrichHomework = true,
+    bool findNextSchoolDay = false,
+  }) async {
     isLoading = true;
     error = null;
     notifyListeners();

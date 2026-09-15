@@ -34,6 +34,16 @@ class BellTimeService {
 
   DateTime get moscowNow =>
       _now().toUtc().add(_clockOffset).add(const Duration(hours: 3));
+
+  /// Перевод школьного времени в момент по часам устройства для обновления виджета.
+  DateTime fromMoscowTime(DateTime wallTime) => DateTime.utc(
+    wallTime.year,
+    wallTime.month,
+    wallTime.day,
+    wallTime.hour,
+    wallTime.minute,
+    wallTime.second,
+  ).subtract(const Duration(hours: 3)).subtract(_clockOffset).toLocal();
   bool get isStale =>
       lastSyncedAt == null ||
       _now().difference(lastSyncedAt!) >= interval ||

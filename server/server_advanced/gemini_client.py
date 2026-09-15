@@ -99,6 +99,12 @@ def _access_token():
         return value
 
 
+def _invalidate_access_token(authorization):
+    with _token_lock:
+        if authorization == "Bearer " + (_token["value"] or ""):
+            _token.update(value=None, expires=0.0)
+
+
 def _endpoint():
     if AI_PROVIDER == "openrouter":
         if not OPENROUTER_API_KEY:
@@ -194,6 +200,7 @@ def generate(parts, schema=None, system=None, thinking="low",
 
     started = time.time()
     last_error = None
+    auth_retried = False
     for attempt in range(MAX_ATTEMPTS):
         url, headers = _endpoint()
         request = urllib.request.Request(
@@ -224,6 +231,12 @@ def generate(parts, schema=None, system=None, thinking="low",
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
             last_error = f"HTTP {e.code}: {detail}"
+            if (e.code == 401 and not openrouter and GEMINI_VERTEX_PROJECT
+                    and not auth_retried and attempt < MAX_ATTEMPTS - 1):
+                _invalidate_access_token(headers.get("Authorization"))
+                auth_retried = True
+                log("[Gemini] Vertex отклонил токен, получаем актуальный и повторяем запрос")
+                continue
             if e.code in RETRY_CODES and attempt < MAX_ATTEMPTS - 1:
                 delay = 5 * (attempt + 1)
                 log(f"[{provider}] {e.code}, повтор через {delay} с")

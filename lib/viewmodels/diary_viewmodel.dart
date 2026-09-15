@@ -5,6 +5,7 @@ import '../services/api_service.dart';
 import '../services/lesson_teacher_cache.dart';
 import '../services/marks_cache_service.dart';
 import '../utils/html_content.dart';
+import '../utils/time_utils.dart';
 import '../models/diary_models.dart';
 import '../models/lesson_view_model.dart';
 import '../models/lpart_models.dart';
@@ -24,15 +25,18 @@ class DiaryViewModel extends ChangeNotifier {
   final LessonTeacherCache _teacherCache = LessonTeacherCache();
   int _loadGeneration = 0;
   String? _lessonOwner;
+  final Set<DateTime> _loadedDates = {};
+  bool _automaticDatePending = false;
 
-  String? get _owner => _api.userId == null || _api.currentPrsId == null
+  String? get _owner => _api.studentUserId == null || _api.studentPrsId == null
       ? null
-      : '${_api.isDemo}_${_api.userId}_${_api.currentPrsId}';
+      : '${_api.isDemo}_${_api.studentUserId}_${_api.studentPrsId}';
 
   void _clearIdentityState() {
     _loadGeneration++;
     _lessonOwner = null;
     lessons.clear();
+    _loadedDates.clear();
     isLoading = false;
     error = null;
     if (!_disposed) notifyListeners();
@@ -43,7 +47,8 @@ class DiaryViewModel extends ChangeNotifier {
     DateTime? initialDate,
     bool autoLoad = true,
   }) {
-    selectedDate = initialDate ?? DateTime.now();
+    _automaticDatePending = initialDate == null;
+    selectedDate = initialDate ?? bellScheduleProvider.now;
     _generateWeekSync(selectedDate);
     MarksCacheService().addListener(_clearIdentityState);
     if (autoLoad) loadSchedule();
@@ -64,7 +69,10 @@ class DiaryViewModel extends ChangeNotifier {
     lessons.forEach((key, lessonList) {
       for (int i = 0; i < lessonList.length; i++) {
         final lesson = lessonList[i];
-        final times = bellScheduleProvider.getLessonTime(lesson.num);
+        final times = bellScheduleProvider.getLessonTime(
+          lesson.num,
+          date: DateTime.parse(key),
+        );
         if (times != null) {
           lessonList[i] = lesson.copyWith(
             startTime: times.start,
@@ -106,12 +114,14 @@ class DiaryViewModel extends ChangeNotifier {
   }
 
   void changeWeek(int offset) {
+    _automaticDatePending = false;
     selectedDate = selectedDate.add(Duration(days: offset * 7));
     _generateWeek(selectedDate);
     loadSchedule();
   }
 
   void selectDate(DateTime date) {
+    _automaticDatePending = false;
     selectedDate = date;
 
     if (!currentWeek.any((d) => isSameDay(d, date))) {
@@ -181,7 +191,10 @@ class DiaryViewModel extends ChangeNotifier {
     return result;
   }
 
-  Future<void> loadSchedule({bool enrichHomework = true}) async {
+  Future<void> loadSchedule({
+    bool enrichHomework = true,
+    bool findNextSchoolDay = false,
+  }) async {
     if (currentWeek.isEmpty || _disposed) return;
     final generation = ++_loadGeneration;
     final epoch = _api.identityEpoch;
@@ -197,8 +210,10 @@ class DiaryViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final startOfWeek = currentWeek.first;
-      final endOfWeek = currentWeek.last.add(
+      await bellScheduleProvider.ready;
+      if (!current()) return;
+      var startOfWeek = currentWeek.first;
+      var endOfWeek = currentWeek.last.add(
         const Duration(hours: 23, minutes: 59, seconds: 59),
       );
 
@@ -216,7 +231,10 @@ class DiaryViewModel extends ChangeNotifier {
         isCurrent: owned,
       );
       if (!owned()) return;
-      if (_lessonOwner != owner) lessons.clear();
+      if (_lessonOwner != owner) {
+        lessons.clear();
+        _loadedDates.clear();
+      }
       _lessonOwner = owner;
       for (
         var day = startOfWeek;
@@ -224,9 +242,20 @@ class DiaryViewModel extends ChangeNotifier {
         day = day.add(const Duration(days: 1))
       ) {
         lessons.remove(_dateKey(day));
+        _loadedDates.add(DateTime(day.year, day.month, day.day));
       }
       _processResponse(response, teacherNames);
       _publishWidget();
+
+      if (_automaticDatePending) {
+        await _selectOpeningDate(owned, includeToday: !findNextSchoolDay);
+        if (!owned()) return;
+        _publishWidget();
+        startOfWeek = currentWeek.first;
+        endOfWeek = currentWeek.last.add(
+          const Duration(hours: 23, minutes: 59, seconds: 59),
+        );
+      }
 
       // дотягиваем домашнее задание из lpart
       if (enrichHomework) await _enrichWithLPart(startOfWeek, endOfWeek, owned);
@@ -243,17 +272,126 @@ class DiaryViewModel extends ChangeNotifier {
     }
   }
 
+  Future<void> _selectOpeningDate(
+    bool Function() isCurrent, {
+    bool includeToday = true,
+  }) async {
+    bool active() => isCurrent() && _automaticDatePending;
+    final now = bellScheduleProvider.now;
+    final today = DateUtils.dateOnly(now);
+    final todayLessons = lessons[_dateKey(today)] ?? [];
+    final nowSeconds = now.hour * 3600 + now.minute * 60 + now.second;
+    // До последнего звонка, включая перемены, остаёмся на сегодня.
+    // Если время урока неизвестно, не считаем его закончившимся.
+    final lastEnd = TimeUtils.lastLessonEnd(
+      todayLessons.map((lesson) => lesson.endTime),
+    );
+    final schoolStillAhead =
+        todayLessons.isNotEmpty && (lastEnd == null || nowSeconds < lastEnd);
+    if (includeToday && schoolStillAhead) {
+      selectedDate = today;
+      _generateWeekSync(today);
+      _automaticDatePending = false;
+      return;
+    }
+
+    for (final day in currentWeek) {
+      if (day.isAfter(today) && (lessons[_dateKey(day)]?.isNotEmpty ?? false)) {
+        selectedDate = day;
+        _automaticDatePending = false;
+        return;
+      }
+    }
+
+    // Ищем по фактическому расписанию, включая каникулы. Ограничиваем
+    // поиск годом, чтобы пустой/ещё не опубликованный дневник не зациклился.
+    final limit = DateTime(today.year + 1, today.month, today.day);
+    var start = currentWeek.last.add(const Duration(days: 1));
+    while (active() && start.isBefore(limit)) {
+      final next = start.add(const Duration(days: 28));
+      final end = (next.isAfter(limit) ? limit : next).subtract(
+        const Duration(milliseconds: 1),
+      );
+      final json = await _api.getPrsDiary(
+        start.millisecondsSinceEpoch.toDouble(),
+        end.millisecondsSinceEpoch.toDouble(),
+      );
+      if (!active()) return;
+      final response = PrsDiaryResponse.fromJson(json);
+      final candidates = (response.lesson ?? []).where((lesson) {
+        if (lesson.id == null || lesson.date == null) return false;
+        final date = DateTime.fromMillisecondsSinceEpoch(lesson.date!.toInt());
+        return !date.isBefore(start) && !date.isAfter(end);
+      }).toList()..sort((a, b) => a.date!.compareTo(b.date!));
+      final emptyUntil = candidates.isEmpty
+          ? end.add(const Duration(milliseconds: 1))
+          : DateTime.fromMillisecondsSinceEpoch(candidates.first.date!.toInt());
+      final firstLessonDay = DateTime(
+        emptyUntil.year,
+        emptyUntil.month,
+        emptyUntil.day,
+      );
+      for (
+        var day = start;
+        day.isBefore(firstLessonDay);
+        day = day.add(const Duration(days: 1))
+      ) {
+        lessons.remove(_dateKey(day));
+        _loadedDates.add(DateTime(day.year, day.month, day.day));
+      }
+      if (candidates.isNotEmpty) {
+        final target = DateUtils.dateOnly(
+          DateTime.fromMillisecondsSinceEpoch(candidates.first.date!.toInt()),
+        );
+        final monday = target.subtract(Duration(days: target.weekday - 1));
+        final nextMonday = monday.add(const Duration(days: 7));
+        final weekLessons = candidates.where((lesson) {
+          final date = DateTime.fromMillisecondsSinceEpoch(
+            lesson.date!.toInt(),
+          );
+          return !date.isBefore(monday) && date.isBefore(nextMonday);
+        }).toList();
+        final teacherNames = await _teacherCache.resolve(
+          weekLessons,
+          owner: _owner,
+          isCurrent: active,
+        );
+        if (!active()) return;
+        for (
+          var day = monday;
+          day.isBefore(nextMonday);
+          day = day.add(const Duration(days: 1))
+        ) {
+          lessons.remove(_dateKey(day));
+          _loadedDates.add(DateTime(day.year, day.month, day.day));
+        }
+        _processResponse(
+          PrsDiaryResponse(lesson: weekLessons, user: response.user),
+          teacherNames,
+        );
+        selectedDate = target;
+        _generateWeekSync(target);
+        _automaticDatePending = false;
+        return;
+      }
+      start = next;
+    }
+    if (active()) _automaticDatePending = false;
+  }
+
   void _publishWidget() {
     if (_lessonOwner == null || _lessonOwner != _owner) return;
-    final today = DateUtils.dateOnly(DateTime.now());
-    // просмотр другой недели не должен заменять сегодняшние данные виджета
-    if (!currentWeek.any((day) => isSameDay(day, today))) return;
+    final now = bellScheduleProvider.now;
+    final today = DateTime(now.year, now.month, now.day);
+    // Публикуем и найденную будущую неделю, сохраняя проверенные данные сегодня.
+    if (!_loadedDates.contains(today)) return;
     WidgetDataService().updateScheduleWidget(
       lessons: getLessonsForDate(today),
       date: today,
+      bells: bellScheduleProvider,
       days: {
-        for (final day in currentWeek)
-          DateUtils.dateOnly(day): getLessonsForDate(day),
+        for (final day in _loadedDates)
+          if (!day.isBefore(today)) day: getLessonsForDate(day),
       },
     );
   }
@@ -364,7 +502,7 @@ class DiaryViewModel extends ChangeNotifier {
         }
 
         final num = raw.numInDay ?? 0;
-        final times = bellScheduleProvider.getLessonTime(num);
+        final times = bellScheduleProvider.getLessonTime(num, date: date);
         final startTime = times?.start ?? "";
         final endTime = times?.end ?? "";
 

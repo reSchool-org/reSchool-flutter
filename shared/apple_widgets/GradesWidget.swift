@@ -25,7 +25,8 @@ struct GradesProvider: TimelineProvider {
 struct GradesWidgetEntryView: View {
     let entry: GradesEntry
     var body: some View {
-        let rows = entry.data.grades.prefix(max(1, min(15, entry.preferences.settings.gradesSubjectsCount ?? 6))).map { grade in
+        // вместимость определяет размер виджета, а не сохранённый лимит в 6 предметов.
+        let rows = entry.data.grades.map { grade in
             WidgetRow(title: grade.subject, detail: grade.rating ?? "", meta: "", badge: grade.average.isEmpty ? "-" : grade.average)
         }
         WidgetCanvas(type: "grades", title: "Оценки", icon: "chart.bar",

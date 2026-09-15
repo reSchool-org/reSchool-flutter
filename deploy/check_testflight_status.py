@@ -41,11 +41,17 @@ def externally_testing(build, included, version, now):
 
 
 def find_external_build(client, version, public_url):
-    apps, _ = client.listing("/v1/apps", **{"filter[bundleId]": BUNDLE})
+    def listing(stage, path, **query):
+        try:
+            return client.listing(path, **query)
+        except SafeError as error:
+            raise SafeError(f"{stage}: {error}") from None
+
+    apps, _ = listing("APPS", "/v1/apps", **{"filter[bundleId]": BUNDLE})
     if len(apps) != 1 or apps[0].get("attributes", {}).get("bundleId") != BUNDLE:
         raise ValueError("Expected exactly one App Store Connect app matching the iOS bundle ID")
     app_id = apps[0]["id"]
-    builds, included = client.listing("/v1/builds", **{
+    builds, included = listing("BUILDS", "/v1/builds", **{
         "filter[app]": app_id,
         "filter[preReleaseVersion.version]": version,
         "filter[preReleaseVersion.platform]": "IOS",
@@ -55,21 +61,25 @@ def find_external_build(client, version, public_url):
         "limit": 200,
     })
     now = datetime.datetime.now(datetime.timezone.utc)
-    for build in builds:
-        if not externally_testing(build, included, version, now):
+    candidates = {build["id"]: build for build in builds
+                  if externally_testing(build, included, version, now)}
+    if not candidates:
+        return None
+    # ссылку проверяем локально, состав группы читаем полностью с пагинацией
+    groups, _ = listing("BETA_GROUPS", "/v1/betaGroups", **{
+        "filter[app]": app_id, "limit": 200,
+    })
+    for group in groups:
+        attrs = group.get("attributes", {})
+        if (attrs.get("isInternalGroup") is not False
+                or attrs.get("publicLinkEnabled") is not True
+                or attrs.get("publicLink") != public_url):
             continue
-        # Query the full relationship via a paginated list, not a truncated include.
-        groups, _ = client.listing("/v1/betaGroups", **{
-            "filter[app]": app_id, "filter[builds]": build["id"],
-            "filter[isInternalGroup]": "false", "filter[publicLinkEnabled]": "true",
-            "filter[publicLink]": public_url, "limit": 200,
-        })
-        for group in groups:
-            attrs = group.get("attributes", {})
-            if (attrs.get("isInternalGroup") is False
-                    and attrs.get("publicLinkEnabled") is True
-                    and attrs.get("publicLink") == public_url):
-                return build
+        members, _ = listing("BETA_GROUP_BUILDS", f"/v1/betaGroups/{group['id']}/builds",
+                             limit=200)
+        for member in members:
+            if member.get("id") in candidates:
+                return candidates[member["id"]]
     return None
 
 

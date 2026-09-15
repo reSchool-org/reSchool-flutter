@@ -205,14 +205,16 @@ class PrsDiaryTeacher {
 }
 
 class PrsDiaryPart {
+  final int? id;
   final String? cat;
   final List<PrsDiaryVariant>? variant;
   final double? mrkWt;
 
-  PrsDiaryPart({this.cat, this.variant, this.mrkWt});
+  PrsDiaryPart({this.id, this.cat, this.variant, this.mrkWt});
 
   factory PrsDiaryPart.fromJson(Map<String, dynamic> json) {
     return PrsDiaryPart(
+      id: json['id'],
       cat: json['cat'],
       variant: json['variant'] != null
           ? (json['variant'] as List)

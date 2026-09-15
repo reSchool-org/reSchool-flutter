@@ -135,11 +135,12 @@ class BellScheduleProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   String get currentPresetId => _currentPresetId;
   Map<int, LessonTime> get schedule => Map.unmodifiable(_schedule);
-  int get timeOffset {
-    if (usesServerTime) {
-      return _bellTime.presets[effectivePresetId]?.offsetSeconds ?? 0;
+  int get timeOffset => _offsetForPreset(effectivePresetId);
+  int _offsetForPreset(String id) {
+    if (usesServerFor(id)) {
+      return _bellTime.presets[id]?.offsetSeconds ?? 0;
     }
-    if (supportsServerSync) return _manualOffsets[effectivePresetId] ?? 0;
+    if (BellTimeService.campusIds.contains(id)) return _manualOffsets[id] ?? 0;
     return _timeOffset;
   }
 
@@ -153,16 +154,29 @@ class BellScheduleProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// какой пресет активен прямо сейчас
   String get effectivePresetId {
     if (_autoScheduleEnabled) {
-      final weekday =
-          _bellTime.moscowNow.weekday; // в петербурге используется часовой пояс utc+3
+      final weekday = _bellTime
+          .moscowNow
+          .weekday; // в петербурге используется часовой пояс utc+3
       final pid = _weekdayPresets[weekday];
       if (pid != null) return pid;
     }
     return _currentPresetId;
   }
 
-  Map<int, LessonTime> get _effectiveLessons {
-    final eid = effectivePresetId;
+  String _presetForDate(DateTime date) => _autoScheduleEnabled
+      ? _weekdayPresets[date.weekday] ?? _currentPresetId
+      : _currentPresetId;
+
+  DateTime deviceTimeForDate(DateTime date, {int seconds = 0}) {
+    final wallTime = DateTime(date.year, date.month, date.day, 0, 0, seconds);
+    return usesServerFor(_presetForDate(date))
+        ? _bellTime.fromMoscowTime(wallTime)
+        : wallTime;
+  }
+
+  Map<int, LessonTime> get _effectiveLessons =>
+      _lessonsForPreset(effectivePresetId);
+  Map<int, LessonTime> _lessonsForPreset(String eid) {
     final serverPreset = usesServerFor(eid) ? _bellTime.presets[eid] : null;
     if (serverPreset != null) {
       return serverPreset.lessons.map(
@@ -398,11 +412,16 @@ class BellScheduleProvider extends ChangeNotifier with WidgetsBindingObserver {
     await prefs.setString(_weekdayPresetsKey, jsonEncode(data));
   }
 
-  LessonTime? getLessonTime(int lessonNum, {bool applyOffset = true}) {
-    final baseTime = _effectiveLessons[lessonNum];
+  LessonTime? getLessonTime(
+    int lessonNum, {
+    bool applyOffset = true,
+    DateTime? date,
+  }) {
+    final id = date == null ? effectivePresetId : _presetForDate(date);
+    final baseTime = _lessonsForPreset(id)[lessonNum];
     if (baseTime == null) return null;
 
-    final offset = timeOffset;
+    final offset = _offsetForPreset(id);
     if (!applyOffset || offset == 0) return baseTime;
 
     return LessonTime(
